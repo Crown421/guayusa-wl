@@ -1,16 +1,16 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 use tokio::{sync::mpsc, time::sleep};
 
 use wayland_client::{
-    protocol::{wl_compositor, wl_registry, wl_surface},
     Connection as WaylandConnection, Dispatch, QueueHandle,
+    protocol::{wl_compositor, wl_registry, wl_surface},
 };
 
 // Use the idle inhibit protocol from wayland-protocols crate
@@ -199,15 +199,15 @@ pub async fn setup_wayland() -> Result<(
     .await
     .context("Wayland connection task panicked")?
     .context("Failed to establish Wayland connection")?;
-    
+
     log::debug!("Connected to Wayland display");
-    
+
     let display = conn.display();
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
 
     log::debug!("Created event queue");
-    
+
     let _registry = display.get_registry(&qh, ());
     let mut guayusa_state = GuayusaWaylandState::new();
 
@@ -228,7 +228,9 @@ pub async fn setup_wayland() -> Result<(
         bail!("Failed to get wl_compositor");
     }
     if guayusa_state.idle_inhibit_manager.is_none() {
-        bail!("Failed to get zwp_idle_inhibit_manager_v1. Is your compositor supporting this protocol?");
+        bail!(
+            "Failed to get zwp_idle_inhibit_manager_v1. Is your compositor supporting this protocol?"
+        );
     }
 
     let surface = guayusa_state
@@ -238,20 +240,20 @@ pub async fn setup_wayland() -> Result<(
         .create_surface(&qh, ());
     let mut guayusa_state = guayusa_state; // Make it mutable again
     guayusa_state.surface = Some(surface);
-    
+
     log::debug!("Surface created");
-    
+
     // Use flush and dispatch_pending instead of blocking_dispatch for better async compatibility
     let mut event_queue = event_queue; // Make it mutable again
     if let Err(e) = event_queue.flush() {
         bail!("Failed to flush Wayland connection: {}", e);
     }
-    
+
     // Process any immediate responses without blocking
     if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
         log::warn!("Error dispatching pending events during setup: {}", e);
     }
-    
+
     log::debug!("Surface setup completed");
 
     Ok((conn, event_queue, guayusa_state))
@@ -265,9 +267,9 @@ pub async fn wayland_event_loop(
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let qh = event_queue.handle();
-    
+
     log::info!("Starting Wayland event loop");
-    
+
     loop {
         // Check for shutdown signal
         if shutdown.load(Ordering::Relaxed) {
@@ -311,7 +313,7 @@ pub async fn wayland_event_loop(
                     break;
                 }
             }
-            _ = sleep(Duration::from_millis(100)) => {
+            _ = sleep(Duration::from_millis(800)) => {
                 // Periodic check for shutdown and event processing
                 continue;
             }

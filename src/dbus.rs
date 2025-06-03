@@ -1,13 +1,13 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 use tokio::{sync::mpsc, time::sleep, time::timeout};
-use zbus::{interface, Connection};
+use zbus::{Connection, interface};
 
 use crate::InhibitorMessage;
 
@@ -29,7 +29,10 @@ impl IdleInhibitorInterface {
     fn send_message(&self, message: InhibitorMessage, context: &str) -> zbus::fdo::Result<()> {
         if let Err(e) = self.sender.send(message) {
             log::error!("Failed to send {} message: {}", context, e);
-            return Err(zbus::fdo::Error::Failed(format!("Failed to send {} message: {}", context, e)));
+            return Err(zbus::fdo::Error::Failed(format!(
+                "Failed to send {} message: {}",
+                context, e
+            )));
         }
         Ok(())
     }
@@ -74,15 +77,17 @@ pub async fn setup_dbus_service(
 ) -> Result<zbus::Connection> {
     let idle_inhibitor = IdleInhibitorInterface::new(sender, status);
 
-    let dbus_connection = match timeout(
-        Duration::from_secs(5), 
-        async {
-            let connection = Connection::session().await?;
-            connection.object_server().at(DBUS_OBJECT_PATH, idle_inhibitor).await?;
-            connection.request_name(DBUS_SERVICE_NAME).await?;
-            Ok::<_, zbus::Error>(connection)
-        }
-    ).await {
+    let dbus_connection = match timeout(Duration::from_secs(5), async {
+        let connection = Connection::session().await?;
+        connection
+            .object_server()
+            .at(DBUS_OBJECT_PATH, idle_inhibitor)
+            .await?;
+        connection.request_name(DBUS_SERVICE_NAME).await?;
+        Ok::<_, zbus::Error>(connection)
+    })
+    .await
+    {
         Ok(result) => result?,
         Err(_) => {
             log::error!("D-Bus connection timed out after 5 seconds");
@@ -90,14 +95,15 @@ pub async fn setup_dbus_service(
         }
     };
 
-    log::info!("D-Bus service started at {} on {}", DBUS_SERVICE_NAME, DBUS_OBJECT_PATH);
+    log::info!(
+        "D-Bus service started at {} on {}",
+        DBUS_SERVICE_NAME,
+        DBUS_OBJECT_PATH
+    );
     Ok(dbus_connection)
 }
 
-pub async fn dbus_connection_task(
-    connection: zbus::Connection,
-    shutdown: Arc<AtomicBool>,
-) {
+pub async fn dbus_connection_task(connection: zbus::Connection, shutdown: Arc<AtomicBool>) {
     // Keep the connection alive by waiting for it to close
     let _connection = connection;
     log::info!("D-Bus connection established successfully");
@@ -106,7 +112,7 @@ pub async fn dbus_connection_task(
     while !shutdown.load(Ordering::Relaxed) {
         // Don't call any methods that would close the connection
         // Just sleep and keep the connection in scope
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(500)).await;
     }
     log::info!("D-Bus connection task shutting down");
 }
