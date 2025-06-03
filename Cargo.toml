@@ -1,0 +1,22 @@
+[package]
+name = "matcha_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.31", features = ["unstable", "client"] }
+clap = { version = "4.4", features = ["derive"] }
+# For POSIX shared memory
+shared_memory = "0.12"
+# For POSIX named semaphores - using nix crate for better compatibility
+nix = { version = "0.27", features = ["process", "fs"] }
+signal-hook = "0.3"
+# For some low-level constants or calls if needed
+libc = "0.2"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+
+[build-dependencies]
+wayland-scanner = "0.31"
