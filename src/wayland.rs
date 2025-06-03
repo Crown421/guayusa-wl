@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
+use parking_lot::Mutex;
 use std::{
+    os::unix::io::AsRawFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{io::unix::AsyncFd, sync::mpsc};
 
 use wayland_client::{
     Connection as WaylandConnection, Dispatch, QueueHandle,
@@ -21,28 +22,22 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
 
 use crate::InhibitorMessage;
 
-// Helper function to flush and dispatch Wayland events
+// Optimized helper function to flush and dispatch Wayland events
 fn flush_and_dispatch(
     event_queue: &mut wayland_client::EventQueue<GuayusaWaylandState>,
     state: &mut GuayusaWaylandState,
-    context: &str,
     needs_flush: bool,
 ) -> Result<()> {
-    // Only flush when needed (after state changes)
-    if needs_flush {
-        if let Err(e) = event_queue.flush() {
-            log::error!("Error flushing Wayland connection after {}: {}", context, e);
-            return Err(anyhow::anyhow!("Flush error: {}", e));
-        }
+    // Only flush when needed and return early on error
+    if needs_flush && event_queue.flush().is_err() {
+        return Err(anyhow::anyhow!("Failed to flush Wayland connection"));
     }
 
-    // Always dispatch pending events to keep the event queue processed
-    if let Err(e) = event_queue.dispatch_pending(state) {
-        log::error!("Error dispatching events after {}: {}", context, e);
-        return Err(anyhow::anyhow!("Dispatch error: {}", e));
-    }
-
-    Ok(())
+    // Immediately return dispatch results without extra error processing
+    event_queue
+        .dispatch_pending(state)
+        .map_err(|e| anyhow::anyhow!("Dispatch error: {}", e))
+        .map(|_| ()) // Convert usize result to ()
 }
 
 // Wayland state structure
@@ -202,134 +197,155 @@ pub async fn setup_wayland() -> Result<(
     wayland_client::EventQueue<GuayusaWaylandState>,
     GuayusaWaylandState,
 )> {
-    // Try connecting with better error context
-    let conn = tokio::task::spawn_blocking(move || {
-        WaylandConnection::connect_to_env().context("Failed to connect to Wayland display")
-    })
-    .await
-    .context("Wayland connection task panicked")?
-    .context("Failed to establish Wayland connection")?;
+    // Use a oneshot channel for better error propagation
+    let (tx, rx) = tokio::sync::oneshot::channel();
 
-    log::debug!("Connected to Wayland display");
+    // Spawn just one thread for the blocking operations
+    std::thread::spawn(move || {
+        let result = (|| {
+            let conn = WaylandConnection::connect_to_env()
+                .context("Failed to connect to Wayland display")?;
 
-    let display = conn.display();
-    let mut event_queue = conn.new_event_queue();
-    let qh = event_queue.handle();
+            log::debug!("Connected to Wayland display");
 
-    log::debug!("Created event queue");
+            let display = conn.display();
+            let mut event_queue = conn.new_event_queue();
+            let qh = event_queue.handle();
 
-    let _registry = display.get_registry(&qh, ());
-    let mut guayusa_state = GuayusaWaylandState::new();
+            log::debug!("Created event queue");
 
-    // Initial roundtrip to get globals with timeout protection
-    let (event_queue, guayusa_state) = tokio::task::spawn_blocking({
-        move || {
-            event_queue.blocking_dispatch(&mut guayusa_state)?;
-            Ok::<_, anyhow::Error>((event_queue, guayusa_state))
-        }
-    })
-    .await
-    .context("Registry roundtrip task panicked")?
-    .context("Failed during registry roundtrip")?;
+            let _registry = display.get_registry(&qh, ());
+            let mut state = GuayusaWaylandState::new();
 
-    log::debug!("Registry roundtrip completed");
+            // Do the blocking dispatch in this dedicated thread
+            event_queue.blocking_dispatch(&mut state)?;
 
-    if guayusa_state.compositor.is_none() {
-        bail!("Failed to get wl_compositor");
-    }
-    if guayusa_state.idle_inhibit_manager.is_none() {
-        bail!(
-            "Failed to get zwp_idle_inhibit_manager_v1. Is your compositor supporting this protocol?"
-        );
-    }
+            log::debug!("Registry roundtrip completed");
 
-    let surface = guayusa_state
-        .compositor
-        .as_ref()
-        .unwrap()
-        .create_surface(&qh, ());
-    let mut guayusa_state = guayusa_state; // Make it mutable again
-    guayusa_state.surface = Some(surface);
+            if state.compositor.is_none() {
+                bail!("Failed to get wl_compositor");
+            }
+            if state.idle_inhibit_manager.is_none() {
+                bail!(
+                    "Failed to get zwp_idle_inhibit_manager_v1. Is your compositor supporting this protocol?"
+                );
+            }
 
-    log::debug!("Surface created");
+            let surface = state.compositor.as_ref().unwrap().create_surface(&qh, ());
+            state.surface = Some(surface);
 
-    // Use flush and dispatch_pending instead of blocking_dispatch for better async compatibility
-    let mut event_queue = event_queue; // Make it mutable again
-    if let Err(e) = event_queue.flush() {
-        bail!("Failed to flush Wayland connection: {}", e);
-    }
+            log::debug!("Surface created");
 
-    // Process any immediate responses without blocking
-    if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
-        log::warn!("Error dispatching pending events during setup: {}", e);
-    }
+            // Flush and process immediate responses
+            if let Err(e) = event_queue.flush() {
+                bail!("Failed to flush Wayland connection: {}", e);
+            }
 
-    log::debug!("Surface setup completed");
+            // Process any immediate responses without blocking
+            if let Err(e) = event_queue.dispatch_pending(&mut state) {
+                log::warn!("Error dispatching pending events during setup: {}", e);
+            }
 
-    Ok((conn, event_queue, guayusa_state))
+            log::debug!("Surface setup completed");
+
+            Ok((conn, event_queue, state))
+        })();
+
+        let _ = tx.send(result);
+    });
+
+    // Wait for the thread to complete
+    rx.await.context("Wayland setup thread panicked")?
 }
 
+// Event-driven Wayland event loop using AsyncFd for true event-driven processing
 pub async fn wayland_event_loop(
-    mut event_queue: wayland_client::EventQueue<GuayusaWaylandState>,
-    mut guayusa_state: GuayusaWaylandState,
+    connection: WaylandConnection,
+    event_queue: wayland_client::EventQueue<GuayusaWaylandState>,
+    guayusa_state: GuayusaWaylandState,
     mut receiver: mpsc::UnboundedReceiver<InhibitorMessage>,
     status: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let qh = event_queue.handle();
-
     log::info!("Starting Wayland event loop");
 
+    // Get Wayland's connection file descriptor for async monitoring
+    let wayland_fd = connection.backend().poll_fd().as_raw_fd();
+
+    // Create async watcher for the Wayland file descriptor
+    let wayland_async_fd = AsyncFd::new(wayland_fd)?;
+
+    // Use parking_lot mutex for better performance
+    let mutex_state = Arc::new(Mutex::new((event_queue, guayusa_state)));
+
     loop {
-        // Check for shutdown signal
         if shutdown.load(Ordering::Relaxed) {
             log::info!("Shutdown signal received, cleaning up Wayland resources");
             break;
         }
 
-        // Process Wayland events
-        if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
-            log::error!("Error dispatching Wayland events: {}", e);
-        }
-
-        // Use tokio::select! for more efficient waiting
         tokio::select! {
-            message = receiver.recv() => {
-                if let Some(message) = message {
-                    match message {
-                        InhibitorMessage::Enable => {
-                            if !guayusa_state.is_inhibited() {
-                                if let Err(e) = guayusa_state.create_inhibitor(&qh) {
-                                    log::error!("Failed to create inhibitor: {}", e);
-                                } else {
-                                    let _ = flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor enable", true);
-                                    status.store(true, Ordering::Relaxed);
-                                    log::info!("Idle inhibition enabled");
-                                }
-                            }
+            // Only wake up when Wayland has events to process
+            wayland_ready = wayland_async_fd.readable() => {
+                match wayland_ready {
+                    Ok(mut guard) => {
+                        log::debug!("Processing Wayland event");
+                        let state_lock = mutex_state.clone();
+                        let mut state_guard = state_lock.lock();
+                        let (queue, state) = &mut *state_guard;
+
+                        // Process available events without blocking
+                        if let Err(e) = queue.dispatch_pending(state) {
+                            log::error!("Error dispatching Wayland events: {}", e);
                         }
-                        InhibitorMessage::Disable => {
-                            if guayusa_state.is_inhibited() {
-                                guayusa_state.destroy_inhibitor();
-                                let _ = flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor disable", true);
-                                status.store(false, Ordering::Relaxed);
-                                log::info!("Idle inhibition disabled");
+
+                        // Clear readiness and prepare for next event
+                        guard.clear_ready();
+                    }
+                    Err(e) => {
+                        log::error!("Error waiting for Wayland events: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // Process messages from the receiver
+            Some(message) = receiver.recv() => {
+                let state_lock = mutex_state.clone();
+                let mut state_guard = state_lock.lock();
+                let (queue, state) = &mut *state_guard;
+
+                match message {
+                    InhibitorMessage::Enable => {
+                        if !state.is_inhibited() {
+                            if let Err(e) = state.create_inhibitor(&qh) {
+                                log::error!("Failed to create inhibitor: {}", e);
+                            } else {
+                                let _ = flush_and_dispatch(queue, state, true);
+                                status.store(true, Ordering::Relaxed);
+                                log::info!("Idle inhibition enabled");
                             }
                         }
                     }
-                } else {
-                    // Receiver closed, exit
-                    log::info!("Message receiver closed, exiting event loop");
-                    break;
+                    InhibitorMessage::Disable => {
+                        if state.is_inhibited() {
+                            state.destroy_inhibitor();
+                            let _ = flush_and_dispatch(queue, state, true);
+                            status.store(false, Ordering::Relaxed);
+                            log::info!("Idle inhibition disabled");
+                        }
+                    }
                 }
             }
-            _ = sleep(Duration::from_millis(800)) => {
-                // Periodic check for shutdown and event processing
-                continue;
-            }
+
+            else => break,
         }
     }
 
-    guayusa_state.cleanup();
+    // Clean up resources
+    let mut final_state_guard = mutex_state.lock();
+    final_state_guard.1.cleanup();
+
     Ok(())
 }

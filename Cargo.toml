@@ -11,11 +11,15 @@ tokio = { version = "1.0", default-features = false, features = [
     "rt-multi-thread",
     "macros",
     "signal",
+    "io-util",
+    "fs",
 ] }
 anyhow = "1.0"
 # Use a lighter logging implementation
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
+# High-performance synchronization primitives
+parking_lot = "0.12"
 
 # Release profile optimizations for binary size
 [profile.release]

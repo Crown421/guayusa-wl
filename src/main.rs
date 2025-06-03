@@ -2,11 +2,9 @@ mod dbus;
 mod wayland;
 
 use anyhow::Result;
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use tokio::{signal, sync::mpsc};
 
@@ -24,7 +22,7 @@ async fn main() -> Result<()> {
     log::info!("Starting Guayusa Idle Inhibitor D-Bus service");
 
     // Set up Wayland
-    let (_wayland_conn, event_queue, guayusa_state) = wayland::setup_wayland().await?;
+    let (wayland_conn, event_queue, guayusa_state) = wayland::setup_wayland().await?;
 
     log::debug!("Wayland setup done");
 
@@ -42,21 +40,22 @@ async fn main() -> Result<()> {
 
     // Set up signal handling
     let shutdown_clone = Arc::clone(&shutdown);
-    
+
     tokio::spawn(async move {
         let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt()).unwrap();
         let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
-        
+
         tokio::select! {
             _ = sigint.recv() => log::info!("Received SIGINT, shutting down"),
             _ = sigterm.recv() => log::info!("Received SIGTERM, shutting down"),
         }
-        
+
         shutdown_clone.store(true, Ordering::Relaxed);
     });
 
     // Run the Wayland event loop
     let wayland_task = tokio::spawn(wayland::wayland_event_loop(
+        wayland_conn,
         event_queue,
         guayusa_state,
         receiver,
