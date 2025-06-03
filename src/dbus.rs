@@ -11,8 +11,8 @@ use zbus::{interface, ConnectionBuilder};
 
 use crate::InhibitorMessage;
 
-const DBUS_OBJECT_PATH: &str = "/org/matcha/IdleInhibitor";
-const DBUS_SERVICE_NAME: &str = "org.matcha.IdleInhibitor";
+const DBUS_OBJECT_PATH: &str = "/org/guayusa/IdleInhibitor";
+const DBUS_SERVICE_NAME: &str = "org.guayusa.IdleInhibitor";
 
 // D-Bus interface for the idle inhibitor
 pub struct IdleInhibitorInterface {
@@ -26,7 +26,7 @@ impl IdleInhibitorInterface {
     }
 }
 
-#[interface(name = "org.matcha.IdleInhibitor")]
+#[interface(name = "org.guayusa.IdleInhibitor")]
 impl IdleInhibitorInterface {
     /// Enable idle inhibition
     fn enable(&self) -> zbus::fdo::Result<()> {

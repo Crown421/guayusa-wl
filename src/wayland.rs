@@ -22,16 +22,16 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
 use crate::InhibitorMessage;
 
 // Wayland state structure
-pub struct MatchaWaylandState {
+pub struct GuayusaWaylandState {
     compositor: Option<wl_compositor::WlCompositor>,
     idle_inhibit_manager: Option<ZwpIdleInhibitManagerV1>,
     surface: Option<wl_surface::WlSurface>,
     inhibitor: Option<ZwpIdleInhibitorV1>,
 }
 
-impl MatchaWaylandState {
+impl GuayusaWaylandState {
     pub fn new() -> Self {
-        MatchaWaylandState {
+        GuayusaWaylandState {
             compositor: None,
             idle_inhibit_manager: None,
             surface: None,
@@ -81,7 +81,7 @@ impl MatchaWaylandState {
 }
 
 // Implement Dispatch for Wayland objects we care about
-impl Dispatch<wl_registry::WlRegistry, ()> for MatchaWaylandState {
+impl Dispatch<wl_registry::WlRegistry, ()> for GuayusaWaylandState {
     fn event(
         state: &mut Self,
         registry: &wl_registry::WlRegistry,
@@ -96,7 +96,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for MatchaWaylandState {
             version,
         } = event
         {
-            log::debug!(target: "matcha_rust::wayland", "Global: name={}, interface={}, version={}", name, interface, version);
+            log::debug!(target: "guayusa_rust::wayland", "Global: name={}, interface={}, version={}", name, interface, version);
             match interface.as_str() {
                 "wl_compositor" => {
                     log::info!("Found wl_compositor");
@@ -125,7 +125,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for MatchaWaylandState {
 }
 
 // Dummy dispatch for objects we bind but don't need to handle events for
-impl Dispatch<wl_compositor::WlCompositor, ()> for MatchaWaylandState {
+impl Dispatch<wl_compositor::WlCompositor, ()> for GuayusaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &wl_compositor::WlCompositor,
@@ -137,7 +137,7 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for MatchaWaylandState {
     }
 }
 
-impl Dispatch<wl_surface::WlSurface, ()> for MatchaWaylandState {
+impl Dispatch<wl_surface::WlSurface, ()> for GuayusaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &wl_surface::WlSurface,
@@ -149,7 +149,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for MatchaWaylandState {
     }
 }
 
-impl Dispatch<ZwpIdleInhibitManagerV1, ()> for MatchaWaylandState {
+impl Dispatch<ZwpIdleInhibitManagerV1, ()> for GuayusaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &ZwpIdleInhibitManagerV1,
@@ -161,7 +161,7 @@ impl Dispatch<ZwpIdleInhibitManagerV1, ()> for MatchaWaylandState {
     }
 }
 
-impl Dispatch<ZwpIdleInhibitorV1, ()> for MatchaWaylandState {
+impl Dispatch<ZwpIdleInhibitorV1, ()> for GuayusaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &ZwpIdleInhibitorV1,
@@ -175,8 +175,8 @@ impl Dispatch<ZwpIdleInhibitorV1, ()> for MatchaWaylandState {
 
 pub async fn setup_wayland() -> Result<(
     WaylandConnection,
-    wayland_client::EventQueue<MatchaWaylandState>,
-    MatchaWaylandState,
+    wayland_client::EventQueue<GuayusaWaylandState>,
+    GuayusaWaylandState,
 )> {
     // Try connecting with better error context
     let conn = tokio::task::spawn_blocking(move || {
@@ -195,13 +195,13 @@ pub async fn setup_wayland() -> Result<(
     log::debug!("Created event queue");
     
     let _registry = display.get_registry(&qh, ());
-    let mut matcha_state = MatchaWaylandState::new();
+    let mut guayusa_state = GuayusaWaylandState::new();
 
     // Initial roundtrip to get globals with timeout protection
-    let (event_queue, matcha_state) = tokio::task::spawn_blocking({
+    let (event_queue, guayusa_state) = tokio::task::spawn_blocking({
         move || {
-            event_queue.blocking_dispatch(&mut matcha_state)?;
-            Ok::<_, anyhow::Error>((event_queue, matcha_state))
+            event_queue.blocking_dispatch(&mut guayusa_state)?;
+            Ok::<_, anyhow::Error>((event_queue, guayusa_state))
         }
     })
     .await
@@ -210,20 +210,20 @@ pub async fn setup_wayland() -> Result<(
 
     log::debug!("Registry roundtrip completed");
 
-    if matcha_state.compositor.is_none() {
+    if guayusa_state.compositor.is_none() {
         bail!("Failed to get wl_compositor");
     }
-    if matcha_state.idle_inhibit_manager.is_none() {
+    if guayusa_state.idle_inhibit_manager.is_none() {
         bail!("Failed to get zwp_idle_inhibit_manager_v1. Is your compositor supporting this protocol?");
     }
 
-    let surface = matcha_state
+    let surface = guayusa_state
         .compositor
         .as_ref()
         .unwrap()
         .create_surface(&qh, ());
-    let mut matcha_state = matcha_state; // Make it mutable again
-    matcha_state.surface = Some(surface);
+    let mut guayusa_state = guayusa_state; // Make it mutable again
+    guayusa_state.surface = Some(surface);
     
     log::debug!("Surface created");
     
@@ -234,18 +234,18 @@ pub async fn setup_wayland() -> Result<(
     }
     
     // Process any immediate responses without blocking
-    if let Err(e) = event_queue.dispatch_pending(&mut matcha_state) {
+    if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
         log::warn!("Error dispatching pending events during setup: {}", e);
     }
     
     log::debug!("Surface setup completed");
 
-    Ok((conn, event_queue, matcha_state))
+    Ok((conn, event_queue, guayusa_state))
 }
 
 pub async fn wayland_event_loop(
-    mut event_queue: wayland_client::EventQueue<MatchaWaylandState>,
-    mut matcha_state: MatchaWaylandState,
+    mut event_queue: wayland_client::EventQueue<GuayusaWaylandState>,
+    mut guayusa_state: GuayusaWaylandState,
     mut receiver: mpsc::UnboundedReceiver<InhibitorMessage>,
     status: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
@@ -262,7 +262,7 @@ pub async fn wayland_event_loop(
         }
 
         // Process Wayland events
-        if let Err(e) = event_queue.dispatch_pending(&mut matcha_state) {
+        if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
             log::error!("Error dispatching Wayland events: {}", e);
         }
 
@@ -270,8 +270,8 @@ pub async fn wayland_event_loop(
         while let Ok(message) = receiver.try_recv() {
             match message {
                 InhibitorMessage::Enable => {
-                    if !matcha_state.is_inhibited() {
-                        if let Err(e) = matcha_state.create_inhibitor(&qh) {
+                    if !guayusa_state.is_inhibited() {
+                        if let Err(e) = guayusa_state.create_inhibitor(&qh) {
                             log::error!("Failed to create inhibitor: {}", e);
                         } else {
                             // Flush the connection to ensure the inhibitor creation is sent immediately
@@ -279,7 +279,7 @@ pub async fn wayland_event_loop(
                                 log::error!("Error flushing Wayland connection after inhibitor enable: {}", e);
                             }
                             // Process any immediate responses
-                            if let Err(e) = event_queue.dispatch_pending(&mut matcha_state) {
+                            if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
                                 log::error!("Error dispatching events after inhibitor enable: {}", e);
                             }
                             status.store(true, Ordering::Relaxed);
@@ -288,14 +288,14 @@ pub async fn wayland_event_loop(
                     }
                 }
                 InhibitorMessage::Disable => {
-                    if matcha_state.is_inhibited() {
-                        matcha_state.destroy_inhibitor();
+                    if guayusa_state.is_inhibited() {
+                        guayusa_state.destroy_inhibitor();
                         // Flush the connection to ensure the inhibitor destruction is sent immediately
                         if let Err(e) = event_queue.flush() {
                             log::error!("Error flushing Wayland connection after inhibitor disable: {}", e);
                         }
                         // Process any immediate responses
-                        if let Err(e) = event_queue.dispatch_pending(&mut matcha_state) {
+                        if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
                             log::error!("Error dispatching events after inhibitor disable: {}", e);
                         }
                         status.store(false, Ordering::Relaxed);
@@ -314,6 +314,6 @@ pub async fn wayland_event_loop(
         sleep(Duration::from_millis(10)).await;
     }
 
-    matcha_state.cleanup();
+    guayusa_state.cleanup();
     Ok(())
 }

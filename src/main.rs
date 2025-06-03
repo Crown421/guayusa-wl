@@ -25,10 +25,10 @@ pub enum InhibitorMessage {
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    log::info!("Starting Matcha Idle Inhibitor D-Bus service");
+    log::info!("Starting Guayusa Idle Inhibitor D-Bus service");
 
     // Set up Wayland
-    let (_wayland_conn, event_queue, matcha_state) = wayland::setup_wayland().await?;
+    let (_wayland_conn, event_queue, guayusa_state) = wayland::setup_wayland().await?;
 
     log::debug!("Wayland setup done");
 
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     // Run the Wayland event loop
     let wayland_task = tokio::spawn(wayland::wayland_event_loop(
         event_queue,
-        matcha_state,
+        guayusa_state,
         receiver,
         status,
         Arc::clone(&shutdown),
@@ -99,6 +99,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    log::info!("Matcha Idle Inhibitor service stopped");
+    log::info!("Guayusa Idle Inhibitor service stopped");
     Ok(())
 }

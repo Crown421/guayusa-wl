@@ -533,6 +533,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
+name = "guayusa"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "futures",
+ "log",
+ "signal-hook",
+ "signal-hook-tokio",
+ "tokio",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-scanner",
+ "zbus",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -610,23 +627,6 @@ name = "log"
 version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
-
-[[package]]
-name = "matcha_rust"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "futures",
- "log",
- "signal-hook",
- "signal-hook-tokio",
- "tokio",
- "wayland-client",
- "wayland-protocols",
- "wayland-scanner",
- "zbus",
-]
 
 [[package]]
 name = "memchr"
