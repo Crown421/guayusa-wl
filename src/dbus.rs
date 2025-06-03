@@ -11,7 +11,7 @@ use zbus::{interface, ConnectionBuilder};
 
 use crate::InhibitorMessage;
 
-const DBUS_OBJECT_PATH: &str = "/org/guayusa/IdleInhibitor";
+const DBUS_OBJECT_PATH: &str = "/";
 const DBUS_SERVICE_NAME: &str = "org.guayusa.IdleInhibitor";
 
 // D-Bus interface for the idle inhibitor
@@ -26,7 +26,7 @@ impl IdleInhibitorInterface {
     }
 }
 
-#[interface(name = "org.guayusa.IdleInhibitor")]
+#[interface(name = "org.guayusa.Idle")]
 impl IdleInhibitorInterface {
     /// Enable idle inhibition
     fn enable(&self) -> zbus::fdo::Result<()> {
@@ -44,6 +44,40 @@ impl IdleInhibitorInterface {
         if let Err(e) = self.sender.send(InhibitorMessage::Disable) {
             log::error!("Failed to send disable message: {}", e);
             return Err(zbus::fdo::Error::Failed(format!("Failed to send disable message: {}", e)));
+        }
+        Ok(())
+    }
+
+    /// Toggle idle inhibition state
+    fn toggle(&self) -> zbus::fdo::Result<bool> {
+        log::debug!("D-Bus: Toggle method called");
+        let current_status = self.status.load(Ordering::Relaxed);
+        let message = if current_status {
+            InhibitorMessage::Disable
+        } else {
+            InhibitorMessage::Enable
+        };
+        
+        if let Err(e) = self.sender.send(message) {
+            log::error!("Failed to send toggle message: {}", e);
+            return Err(zbus::fdo::Error::Failed(format!("Failed to send toggle message: {}", e)));
+        }
+        
+        Ok(!current_status) // Return the new expected state
+    }
+
+    /// Set idle inhibition state (true = enable, false = disable)
+    fn set_inhibit(&self, enable: bool) -> zbus::fdo::Result<()> {
+        log::debug!("D-Bus: SetInhibit method called with enable={}", enable);
+        let message = if enable {
+            InhibitorMessage::Enable
+        } else {
+            InhibitorMessage::Disable
+        };
+        
+        if let Err(e) = self.sender.send(message) {
+            log::error!("Failed to send set_inhibit message: {}", e);
+            return Err(zbus::fdo::Error::Failed(format!("Failed to send set_inhibit message: {}", e)));
         }
         Ok(())
     }

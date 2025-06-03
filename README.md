@@ -25,8 +25,8 @@ cargo run --release
 
 The service will start and expose a D-Bus interface at:
 - **Service Name**: `org.guayusa.IdleInhibitor`
-- **Object Path**: `/org/guayusa/IdleInhibitor`
-- **Interface**: `org.guayusa.IdleInhibitor`
+- **Object Path**: `/`
+- **Interface**: `org.guayusa.Idle`
 
 ### D-Bus Interface
 
@@ -35,7 +35,9 @@ The service exposes the following methods and properties:
 #### Methods
 
 - `Enable()` - Enables idle inhibition
-- `Disable()` - Disables idle inhibition
+- `Disable()` - Disables idle inhibition  
+- `Toggle()` - Toggles idle inhibition state (returns new state)
+- `SetInhibit(bool)` - Sets idle inhibition state (true = enable, false = disable)
 
 #### Properties
 
@@ -45,17 +47,32 @@ The service exposes the following methods and properties:
 
 #### Enable idle inhibition:
 ```bash
-busctl --user call org.guayusa.IdleInhibitor /org/guayusa/IdleInhibitor org.guayusa.IdleInhibitor Enable
+busctl --user call org.guayusa.IdleInhibitor / org.guayusa.Idle Enable
 ```
 
 #### Disable idle inhibition:
 ```bash
-busctl --user call org.guayusa.IdleInhibitor /org/guayusa/IdleInhibitor org.guayusa.IdleInhibitor Disable
+busctl --user call org.guayusa.IdleInhibitor / org.guayusa.Idle Disable
+```
+
+#### Toggle idle inhibition:
+```bash
+busctl --user call org.guayusa.IdleInhibitor / org.guayusa.Idle Toggle
+```
+
+#### Set inhibition state (enable):
+```bash
+busctl --user call org.guayusa.IdleInhibitor / org.guayusa.Idle SetInhibit b true
+```
+
+#### Set inhibition state (disable):
+```bash
+busctl --user call org.guayusa.IdleInhibitor / org.guayusa.Idle SetInhibit b false
 ```
 
 #### Check current status:
 ```bash
-busctl --user get-property org.guayusa.IdleInhibitor /org/guayusa/IdleInhibitor org.guayusa.IdleInhibitor Status
+busctl --user get-property org.guayusa.IdleInhibitor / org.guayusa.Idle Status
 ```
 
 #### Monitor D-Bus signals (for debugging):
@@ -67,18 +84,22 @@ busctl --user monitor org.guayusa.IdleInhibitor
 
 #### Enable idle inhibition:
 ```bash
-gdbus call --session --dest org.guayusa.IdleInhibitor --object-path /org/guayusa/IdleInhibitor --method org.guayusa.IdleInhibitor.Enable
+gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.guayusa.Idle.Enable
 ```
 
 #### Disable idle inhibition:
 ```bash
-gdbus call --session --dest org.guayusa.IdleInhibitor --object-path /org/guayusa/IdleInhibitor --method org.guayusa.IdleInhibitor.Disable
+gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.guayusa.Idle.Disable
+```
+
+#### Toggle idle inhibition:
+```bash
+gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.guayusa.Idle.Toggle
 ```
 
 #### Check current status:
 ```bash
-gdbus introspect --session --dest org.guayusa.IdleInhibitor --object-path /org/guayusa/IdleInhibitor
-gdbus call --session --dest org.guayusa.IdleInhibitor --object-path /org/guayusa/IdleInhibitor --method org.freedesktop.DBus.Properties.Get org.guayusa.IdleInhibitor Status
+gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.freedesktop.DBus.Properties.Get org.guayusa.Idle Status
 ```
 
 ## Systemd Service (Optional)
