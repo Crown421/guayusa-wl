@@ -21,6 +21,20 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
 
 use crate::InhibitorMessage;
 
+// Helper function to flush and dispatch Wayland events
+fn flush_and_dispatch(
+    event_queue: &mut wayland_client::EventQueue<GuayusaWaylandState>,
+    state: &mut GuayusaWaylandState,
+    context: &str,
+) {
+    if let Err(e) = event_queue.flush() {
+        log::error!("Error flushing Wayland connection after {}: {}", context, e);
+    }
+    if let Err(e) = event_queue.dispatch_pending(state) {
+        log::error!("Error dispatching events after {}: {}", context, e);
+    }
+}
+
 // Wayland state structure
 pub struct GuayusaWaylandState {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -266,52 +280,42 @@ pub async fn wayland_event_loop(
             log::error!("Error dispatching Wayland events: {}", e);
         }
 
-        // Handle D-Bus messages
-        while let Ok(message) = receiver.try_recv() {
-            match message {
-                InhibitorMessage::Enable => {
-                    if !guayusa_state.is_inhibited() {
-                        if let Err(e) = guayusa_state.create_inhibitor(&qh) {
-                            log::error!("Failed to create inhibitor: {}", e);
-                        } else {
-                            // Flush the connection to ensure the inhibitor creation is sent immediately
-                            if let Err(e) = event_queue.flush() {
-                                log::error!("Error flushing Wayland connection after inhibitor enable: {}", e);
+        // Use tokio::select! for more efficient waiting
+        tokio::select! {
+            message = receiver.recv() => {
+                if let Some(message) = message {
+                    match message {
+                        InhibitorMessage::Enable => {
+                            if !guayusa_state.is_inhibited() {
+                                if let Err(e) = guayusa_state.create_inhibitor(&qh) {
+                                    log::error!("Failed to create inhibitor: {}", e);
+                                } else {
+                                    flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor enable");
+                                    status.store(true, Ordering::Relaxed);
+                                    log::info!("Idle inhibition enabled");
+                                }
                             }
-                            // Process any immediate responses
-                            if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
-                                log::error!("Error dispatching events after inhibitor enable: {}", e);
+                        }
+                        InhibitorMessage::Disable => {
+                            if guayusa_state.is_inhibited() {
+                                guayusa_state.destroy_inhibitor();
+                                flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor disable");
+                                status.store(false, Ordering::Relaxed);
+                                log::info!("Idle inhibition disabled");
                             }
-                            status.store(true, Ordering::Relaxed);
-                            log::info!("Idle inhibition enabled");
                         }
                     }
-                }
-                InhibitorMessage::Disable => {
-                    if guayusa_state.is_inhibited() {
-                        guayusa_state.destroy_inhibitor();
-                        // Flush the connection to ensure the inhibitor destruction is sent immediately
-                        if let Err(e) = event_queue.flush() {
-                            log::error!("Error flushing Wayland connection after inhibitor disable: {}", e);
-                        }
-                        // Process any immediate responses
-                        if let Err(e) = event_queue.dispatch_pending(&mut guayusa_state) {
-                            log::error!("Error dispatching events after inhibitor disable: {}", e);
-                        }
-                        status.store(false, Ordering::Relaxed);
-                        log::info!("Idle inhibition disabled");
-                    }
-                }
-                InhibitorMessage::Shutdown => {
-                    log::info!("Shutdown message received");
-                    shutdown.store(true, Ordering::Relaxed);
+                } else {
+                    // Receiver closed, exit
+                    log::info!("Message receiver closed, exiting event loop");
                     break;
                 }
             }
+            _ = sleep(Duration::from_millis(100)) => {
+                // Periodic check for shutdown and event processing
+                continue;
+            }
         }
-
-        // Small sleep to prevent busy waiting
-        sleep(Duration::from_millis(10)).await;
     }
 
     guayusa_state.cleanup();

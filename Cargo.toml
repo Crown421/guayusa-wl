@@ -12,13 +12,10 @@ tokio = { version = "1.0", default-features = false, features = [
     "macros",
     "signal",
 ] }
-signal-hook = "0.3"
-signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 anyhow = "1.0"
 # Use a lighter logging implementation
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
-futures = { version = "0.3", default-features = false, features = ["std"] }
 
 # Release profile optimizations for binary size
 [profile.release]

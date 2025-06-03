@@ -2,23 +2,19 @@ mod dbus;
 mod wayland;
 
 use anyhow::Result;
-use futures::StreamExt;
-use signal_hook::consts::{SIGINT, SIGTERM};
-use signal_hook_tokio::Signals;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
-use tokio::sync::mpsc;
+use tokio::{signal, sync::mpsc};
 
 // Message types for internal communication
 #[derive(Debug, Clone)]
 pub enum InhibitorMessage {
     Enable,
     Disable,
-    Shutdown,
 }
 
 #[tokio::main]
@@ -45,25 +41,18 @@ async fn main() -> Result<()> {
     log::debug!("D-Bus service setup done");
 
     // Set up signal handling
-    let signals = Signals::new(&[SIGINT, SIGTERM])?;
     let shutdown_clone = Arc::clone(&shutdown);
-    let sender_clone = sender.clone();
-
+    
     tokio::spawn(async move {
-        signals.for_each(|signal| {
-            let shutdown_clone = shutdown_clone.clone();
-            let sender_clone = sender_clone.clone();
-            async move {
-                match signal {
-                    SIGINT | SIGTERM => {
-                        log::info!("Received termination signal, shutting down");
-                        shutdown_clone.store(true, Ordering::Relaxed);
-                        let _ = sender_clone.send(InhibitorMessage::Shutdown);
-                    }
-                    _ => {}
-                }
-            }
-        }).await;
+        let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt()).unwrap();
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+        
+        tokio::select! {
+            _ = sigint.recv() => log::info!("Received SIGINT, shutting down"),
+            _ = sigterm.recv() => log::info!("Received SIGTERM, shutting down"),
+        }
+        
+        shutdown_clone.store(true, Ordering::Relaxed);
     });
 
     // Run the Wayland event loop

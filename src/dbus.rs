@@ -24,6 +24,15 @@ impl IdleInhibitorInterface {
     pub fn new(sender: mpsc::UnboundedSender<InhibitorMessage>, status: Arc<AtomicBool>) -> Self {
         Self { sender, status }
     }
+
+    /// Helper function to send messages with consistent error handling
+    fn send_message(&self, message: InhibitorMessage, context: &str) -> zbus::fdo::Result<()> {
+        if let Err(e) = self.sender.send(message) {
+            log::error!("Failed to send {} message: {}", context, e);
+            return Err(zbus::fdo::Error::Failed(format!("Failed to send {} message: {}", context, e)));
+        }
+        Ok(())
+    }
 }
 
 #[interface(name = "org.guayusa.Idle")]
@@ -31,39 +40,13 @@ impl IdleInhibitorInterface {
     /// Enable idle inhibition
     fn enable(&self) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: Enable method called");
-        if let Err(e) = self.sender.send(InhibitorMessage::Enable) {
-            log::error!("Failed to send enable message: {}", e);
-            return Err(zbus::fdo::Error::Failed(format!("Failed to send enable message: {}", e)));
-        }
-        Ok(())
+        self.send_message(InhibitorMessage::Enable, "enable")
     }
 
     /// Disable idle inhibition
     fn disable(&self) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: Disable method called");
-        if let Err(e) = self.sender.send(InhibitorMessage::Disable) {
-            log::error!("Failed to send disable message: {}", e);
-            return Err(zbus::fdo::Error::Failed(format!("Failed to send disable message: {}", e)));
-        }
-        Ok(())
-    }
-
-    /// Toggle idle inhibition state
-    fn toggle(&self) -> zbus::fdo::Result<bool> {
-        log::debug!("D-Bus: Toggle method called");
-        let current_status = self.status.load(Ordering::Relaxed);
-        let message = if current_status {
-            InhibitorMessage::Disable
-        } else {
-            InhibitorMessage::Enable
-        };
-        
-        if let Err(e) = self.sender.send(message) {
-            log::error!("Failed to send toggle message: {}", e);
-            return Err(zbus::fdo::Error::Failed(format!("Failed to send toggle message: {}", e)));
-        }
-        
-        Ok(!current_status) // Return the new expected state
+        self.send_message(InhibitorMessage::Disable, "disable")
     }
 
     /// Set idle inhibition state (true = enable, false = disable)
@@ -74,12 +57,8 @@ impl IdleInhibitorInterface {
         } else {
             InhibitorMessage::Disable
         };
-        
-        if let Err(e) = self.sender.send(message) {
-            log::error!("Failed to send set_inhibit message: {}", e);
-            return Err(zbus::fdo::Error::Failed(format!("Failed to send set_inhibit message: {}", e)));
-        }
-        Ok(())
+        let context = if enable { "enable" } else { "disable" };
+        self.send_message(message, context)
     }
 
     /// Get the current status of idle inhibition
