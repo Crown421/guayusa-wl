@@ -308,8 +308,12 @@ pub async fn wayland_event_loop(
     // Use parking_lot mutex for better performance
     let mutex_state = Arc::new(Mutex::new((event_queue, guayusa_state)));
 
-    // Add heartbeat tracking for connection health
-    let mut last_heartbeat = std::time::Instant::now();
+    // Heartbeat setup - integrated into select! for efficiency
+    let heartbeat_duration = std::time::Duration::from_secs(300);
+    let mut heartbeat_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + heartbeat_duration,
+        heartbeat_duration,
+    );
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -317,31 +321,13 @@ pub async fn wayland_event_loop(
             break;
         }
 
-        // Simple connection health check every 5 minutes
-        if last_heartbeat.elapsed() > std::time::Duration::from_secs(300) {
-            let is_healthy = connection.backend().flush().is_ok();
-            log::debug!(
-                "Wayland connection health check: {}",
-                if is_healthy { "OK" } else { "Failed" }
-            );
-            last_heartbeat = std::time::Instant::now();
-
-            if !is_healthy {
-                log::error!("Wayland connection unhealthy, exiting event loop");
-                break;
-            }
-        }
-
         tokio::select! {
-            // Add timeout to reduce unnecessary CPU wakeups
-            wayland_ready = tokio::time::timeout(
-                std::time::Duration::from_millis(800),
-                wayland_async_fd.readable()
-            ) => {
-                match wayland_ready {
-                    Ok(Ok(mut guard)) => {
+            // Wayland events - no timeout, purely event-driven for maximum efficiency
+            result = wayland_async_fd.readable() => {
+                match result {
+                    Ok(mut fd_guard) => {
                         log::debug!("Processing Wayland event");
-                        let mut state_guard = mutex_state.lock(); // Don't clone the Arc
+                        let mut state_guard = mutex_state.lock();
                         let (queue, state) = &mut *state_guard;
 
                         // Process available events with batch processing for efficiency
@@ -350,65 +336,81 @@ pub async fn wayland_event_loop(
                         }
 
                         // Clear readiness and prepare for next event
-                        guard.clear_ready();
+                        fd_guard.clear_ready();
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         log::error!("Error waiting for Wayland events: {}", e);
                         break;
                     }
-                    Err(_) => {} // Timeout - no events, which is the common case for idle inhibitor
                 }
             }
 
-            // Process messages from the receiver
+            // Process messages from the receiver - optimized mutex usage
             Some(message) = receiver.recv() => {
+                let mut state_guard = mutex_state.lock(); // Lock once for the whole operation
+                let (queue, state) = &mut *state_guard;
+
                 match message {
                     InhibitorMessage::Enable => {
-                        // Check status before locking
-                        let currently_inhibited = {
-                            let state_guard = mutex_state.lock();
-                            state_guard.1.is_inhibited()
-                        };
-
-                        if !currently_inhibited {
-                            let mut state_guard = mutex_state.lock();
-                            let (queue, state) = &mut *state_guard;
-
+                        if !state.is_inhibited() {
                             if let Err(e) = state.create_inhibitor(&qh) {
                                 log::error!("Failed to create inhibitor: {}", e);
                             } else {
-                                let _ = flush_and_dispatch(queue, state, true);
-                                status.store(true, Ordering::Relaxed);
-                                log::info!("Idle inhibition enabled");
+                                if let Err(e) = flush_and_dispatch(queue, state, true) {
+                                    log::error!("Error flushing after creating inhibitor: {}", e);
+                                } else {
+                                    status.store(true, Ordering::Relaxed);
+                                    log::info!("Idle inhibition enabled");
+                                }
                             }
+                        } else {
+                            log::debug!("Inhibitor already enabled, no action taken.");
                         }
                     }
                     InhibitorMessage::Disable => {
-                        // Check status before locking
-                        let currently_inhibited = {
-                            let state_guard = mutex_state.lock();
-                            state_guard.1.is_inhibited()
-                        };
-
-                        if currently_inhibited {
-                            let mut state_guard = mutex_state.lock();
-                            let (queue, state) = &mut *state_guard;
+                        if state.is_inhibited() {
                             state.destroy_inhibitor();
-                            let _ = flush_and_dispatch(queue, state, true);
-                            status.store(false, Ordering::Relaxed);
-                            log::info!("Idle inhibition disabled");
+                            if let Err(e) = flush_and_dispatch(queue, state, true) {
+                                log::error!("Error flushing after destroying inhibitor: {}", e);
+                            } else {
+                                status.store(false, Ordering::Relaxed);
+                                log::info!("Idle inhibition disabled");
+                            }
+                        } else {
+                            log::debug!("Inhibitor already disabled, no action taken.");
                         }
                     }
                 }
             }
 
-            else => break,
+            // Heartbeat timer - integrated into select! for efficiency
+            _ = heartbeat_interval.tick() => {
+                log::debug!("Performing Wayland connection heartbeat check");
+                if connection.backend().flush().is_err() {
+                    log::error!("Wayland connection unhealthy (flush failed), exiting event loop");
+                    break;
+                }
+                log::debug!("Wayland connection heartbeat OK");
+            }
+
+            // This branch handles the case where receiver is closed
+            else => {
+                log::info!("Command receiver channel closed, exiting event loop.");
+                break;
+            }
         }
     }
 
     // Clean up resources
+    log::info!("Cleaning up Wayland resources before exiting event loop.");
     let mut final_state_guard = mutex_state.lock();
-    final_state_guard.1.cleanup();
+    let (queue, state) = &mut *final_state_guard;
+    state.cleanup();
+    // Ensure any final messages (like destroy) from cleanup are sent
+    if let Err(e) = queue.flush() {
+        log::warn!("Failed to flush Wayland queue during final cleanup: {}", e);
+    }
+    drop(final_state_guard);
 
     Ok(())
 }
