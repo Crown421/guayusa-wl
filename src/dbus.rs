@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::mpsc, time::sleep, time::timeout};
-use zbus::{interface, ConnectionBuilder};
+use zbus::{interface, Connection};
 
 use crate::InhibitorMessage;
 
@@ -97,10 +97,12 @@ pub async fn setup_dbus_service(
 
     let dbus_connection = match timeout(
         Duration::from_secs(5), 
-        ConnectionBuilder::session()?
-            .name(DBUS_SERVICE_NAME)?
-            .serve_at(DBUS_OBJECT_PATH, idle_inhibitor)?
-            .build()
+        async {
+            let connection = Connection::session().await?;
+            connection.object_server().at(DBUS_OBJECT_PATH, idle_inhibitor).await?;
+            connection.request_name(DBUS_SERVICE_NAME).await?;
+            Ok::<_, zbus::Error>(connection)
+        }
     ).await {
         Ok(result) => result?,
         Err(_) => {

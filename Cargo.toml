@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 wayland-client = "0.31"
-wayland-protocols = { version = "0.31", features = ["unstable", "client"] }
-zbus = { version = "4.0", default-features = false, features = ["tokio"] }
+wayland-protocols = { version = "0.32", features = ["unstable", "client"] }
+zbus = { version = "5.7", default-features = false, features = ["tokio"] }
 tokio = { version = "1.0", default-features = false, features = [
     "rt-multi-thread",
     "macros",
@@ -17,7 +17,7 @@ signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 anyhow = "1.0"
 # Use a lighter logging implementation
 log = "0.4"
-env_logger = { version = "0.10", default-features = false }
+env_logger = { version = "0.11", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 
 # Release profile optimizations for binary size
