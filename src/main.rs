@@ -63,7 +63,7 @@ impl MatchaWaylandState {
             .context("Idle inhibit manager not available")?;
         let surface = self.surface.as_ref().context("Surface not available")?;
 
-        log::info!("Creating idle inhibitor.");
+        log::debug!("Creating idle inhibitor.");
         self.inhibitor = Some(manager.create_inhibitor(surface, qh, ()));
         surface.commit();
         Ok(())
@@ -71,7 +71,7 @@ impl MatchaWaylandState {
 
     fn destroy_inhibitor(&mut self) {
         if let Some(inhibitor) = self.inhibitor.take() {
-            log::info!("Destroying idle inhibitor.");
+            log::debug!("Destroying idle inhibitor.");
             inhibitor.destroy();
             if let Some(surface) = &self.surface {
                 surface.commit();
@@ -195,7 +195,7 @@ struct IdleInhibitorInterface {
 impl IdleInhibitorInterface {
     /// Enable idle inhibition
     fn enable(&self) -> zbus::fdo::Result<()> {
-        log::info!("D-Bus: Enable method called");
+        log::debug!("D-Bus: Enable method called");
         if let Err(e) = self.sender.send(InhibitorMessage::Enable) {
             log::error!("Failed to send enable message: {}", e);
             return Err(zbus::fdo::Error::Failed(format!("Failed to send enable message: {}", e)));
@@ -205,7 +205,7 @@ impl IdleInhibitorInterface {
 
     /// Disable idle inhibition
     fn disable(&self) -> zbus::fdo::Result<()> {
-        log::info!("D-Bus: Disable method called");
+        log::debug!("D-Bus: Disable method called");
         if let Err(e) = self.sender.send(InhibitorMessage::Disable) {
             log::error!("Failed to send disable message: {}", e);
             return Err(zbus::fdo::Error::Failed(format!("Failed to send disable message: {}", e)));
@@ -225,16 +225,37 @@ async fn setup_wayland() -> Result<(
     wayland_client::EventQueue<MatchaWaylandState>,
     MatchaWaylandState,
 )> {
-    let conn = WaylandConnection::connect_to_env().context("Failed to connect to Wayland display")?;
+    // Try connecting with better error context
+    let conn = tokio::task::spawn_blocking(move || {
+        WaylandConnection::connect_to_env().context("Failed to connect to Wayland display")
+    })
+    .await
+    .context("Wayland connection task panicked")?
+    .context("Failed to establish Wayland connection")?;
+    
+    log::debug!("Connected to Wayland display");
+    
     let display = conn.display();
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
 
+    log::debug!("Created event queue");
+    
     let _registry = display.get_registry(&qh, ());
     let mut matcha_state = MatchaWaylandState::new();
 
-    // Initial roundtrip to get globals
-    event_queue.blocking_dispatch(&mut matcha_state)?;
+    // Initial roundtrip to get globals with timeout protection
+    let (event_queue, matcha_state) = tokio::task::spawn_blocking({
+        move || {
+            event_queue.blocking_dispatch(&mut matcha_state)?;
+            Ok::<_, anyhow::Error>((event_queue, matcha_state))
+        }
+    })
+    .await
+    .context("Registry roundtrip task panicked")?
+    .context("Failed during registry roundtrip")?;
+
+    log::debug!("Registry roundtrip completed");
 
     if matcha_state.compositor.is_none() {
         bail!("Failed to get wl_compositor");
@@ -248,13 +269,22 @@ async fn setup_wayland() -> Result<(
         .as_ref()
         .unwrap()
         .create_surface(&qh, ());
+    let mut matcha_state = matcha_state; // Make it mutable again
     matcha_state.surface = Some(surface);
+    
+    log::debug!("Surface created");
     
     // Initial commit might be needed by some compositors for the surface to be valid
     if let Some(s) = &matcha_state.surface {
         s.commit();
+        log::debug!("Surface committed");
     }
-    event_queue.blocking_dispatch(&mut matcha_state)?;
+    
+    // Use dispatch_pending instead of blocking_dispatch to avoid hanging
+    // This processes any pending events without blocking indefinitely
+    let mut event_queue = event_queue; // Make it mutable again
+    event_queue.dispatch_pending(&mut matcha_state)?;
+    log::debug!("Surface events dispatched");
 
     Ok((conn, event_queue, matcha_state))
 }
@@ -327,16 +357,14 @@ async fn main() -> Result<()> {
     // Set up Wayland
     let (_wayland_conn, event_queue, matcha_state) = setup_wayland().await?;
 
-    // Should be debug
-    log::info!("Wayland setup done");
+    log::debug!("Wayland setup done");
 
     // Set up communication channels
     let (sender, receiver) = mpsc::unbounded_channel();
     let status = Arc::new(AtomicBool::new(false)); // Start with inhibition OFF
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // Should be debug
-    log::info!("Comm channel setup done");
+    log::debug!("Comm channel setup done");
 
     // Set up D-Bus service
     let idle_inhibitor = IdleInhibitorInterface {
@@ -344,8 +372,7 @@ async fn main() -> Result<()> {
         status: Arc::clone(&status),
     };
 
-    // Should be debug
-    log::info!("Inhibitor interface setup done");
+    log::debug!("Inhibitor interface setup done");
 
     let dbus_connection = match timeout(
             Duration::from_secs(5), 
