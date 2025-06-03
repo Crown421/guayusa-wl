@@ -6,17 +6,15 @@ edition = "2021"
 [dependencies]
 wayland-client = "0.31"
 wayland-protocols = { version = "0.31", features = ["unstable", "client"] }
-clap = { version = "4.4", features = ["derive"] }
-# For POSIX shared memory
-shared_memory = "0.12"
-# For POSIX named semaphores - using nix crate for better compatibility
-nix = { version = "0.27", features = ["process", "fs"] }
+# D-Bus support via zbus
+zbus = "4.0"
+tokio = { version = "1.0", features = ["full"] }
 signal-hook = "0.3"
-# For some low-level constants or calls if needed
-libc = "0.2"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.10"
+futures = "0.3"
 
 [build-dependencies]
 wayland-scanner = "0.31"

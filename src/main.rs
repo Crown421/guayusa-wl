@@ -1,25 +1,20 @@
 use anyhow::{bail, Context, Result};
-use clap::Parser;
-use shared_memory::{Shmem, ShmemConf};
-use signal_hook::{
-    consts::{SIGINT, SIGTERM, SIGUSR1},
-    iterator::Signals,
-};
+use futures::StreamExt;
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook_tokio::Signals;
 use std::{
-    io::Write, // For writing to stdout
-    mem,
-    process,
-    ptr,
     sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     time::Duration,
 };
+use tokio::{sync::mpsc, time::sleep, time::timeout};
+use zbus::{interface, ConnectionBuilder};
 
 use wayland_client::{
     protocol::{wl_compositor, wl_registry, wl_surface},
-    Connection, Dispatch, QueueHandle,
+    Connection as WaylandConnection, Dispatch, QueueHandle,
 };
 
 // Use the idle inhibit protocol from wayland-protocols crate
@@ -28,63 +23,15 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
     zwp_idle_inhibitor_v1::{self, ZwpIdleInhibitorV1},
 };
 
-const HELP_MSG: &str = "Usage: matcha_rust [MODE] [OPTION]...\n\
-MODE:\n\
-  -d, --daemon     Main instance (Daemon Mode)\n\
-  -t, --toggle     Toggle instance (Toggle Mode)\n\
-  -s, --status     Get status of inhibitor (Status Mode)\n\n\
-Options:\n\
-  -o, --off        Start daemon with inhibitor off\n\
-  -h, --help       Display this help and exit";
+const DBUS_OBJECT_PATH: &str = "/org/matcha/IdleInhibitor";
+const DBUS_SERVICE_NAME: &str = "org.matcha.IdleInhibitor";
 
-const SHARED_MEM_NAME: &str = "/matcha-idle-inhibit-rust";
-const SIGNAL_FILE: &str = "/tmp/matcha-idle-signal-rust"; // Signal file for IPC
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(u8)]
-enum AppSignalState {
-    Inhibit = 0,
-    Uninhibit = 1,
-    Kill = 2,
-}
-
-impl AppSignalState {
-    fn from_u8(val: u8) -> Self {
-        match val {
-            0 => AppSignalState::Inhibit,
-            1 => AppSignalState::Uninhibit,
-            _ => AppSignalState::Kill, // Default to Kill or handle error
-        }
-    }
-}
-
-// Data stored in shared memory
-// Needs to be simple, Copy, and have a defined layout.
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-struct SharedMemData {
-    inhibit: bool,
-    // The semaphore is now named and managed externally, not in shmem
-}
-
-#[derive(Parser, Debug)]
-#[clap(override_help = HELP_MSG, version = "0.1.0", author = "Rust Developer")]
-struct Args {
-    #[clap(short, long, help = "Main instance (Daemon Mode)")]
-    daemon: bool,
-
-    #[clap(short, long, help = "Toggle instance (Toggle Mode)")]
-    toggle: bool,
-
-    #[clap(short, long, help = "Get status of inhibitor (Status Mode)")]
-    status: bool,
-
-    #[clap(
-        short,
-        long,
-        help = "Start daemon with inhibitor off (only with --daemon)"
-    )]
-    off: bool,
+// Message types for internal communication
+#[derive(Debug, Clone)]
+enum InhibitorMessage {
+    Enable,
+    Disable,
+    Shutdown,
 }
 
 // Wayland state structure
@@ -138,7 +85,10 @@ impl MatchaWaylandState {
         if let Some(surface) = self.surface.take() {
             surface.destroy();
         }
-        // Note: idle_inhibit_manager and compositor don't have destroy methods in this version
+    }
+
+    fn is_inhibited(&self) -> bool {
+        self.inhibitor.is_some()
     }
 }
 
@@ -149,7 +99,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for MatchaWaylandState {
         registry: &wl_registry::WlRegistry,
         event: wl_registry::Event,
         _data: &(),
-        _conn: &Connection,
+        _conn: &WaylandConnection,
         qh: &QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
@@ -186,130 +136,96 @@ impl Dispatch<wl_registry::WlRegistry, ()> for MatchaWaylandState {
     }
 }
 
-// Dummy dispatch for objects we bind but don't need to handle events for (yet)
+// Dummy dispatch for objects we bind but don't need to handle events for
 impl Dispatch<wl_compositor::WlCompositor, ()> for MatchaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &wl_compositor::WlCompositor,
         _event: wl_compositor::Event,
         _data: &(),
-        _conn: &Connection,
+        _conn: &WaylandConnection,
         _qh: &QueueHandle<Self>,
     ) {
     }
 }
+
 impl Dispatch<wl_surface::WlSurface, ()> for MatchaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &wl_surface::WlSurface,
         _event: wl_surface::Event,
         _data: &(),
-        _conn: &Connection,
+        _conn: &WaylandConnection,
         _qh: &QueueHandle<Self>,
     ) {
     }
 }
+
 impl Dispatch<ZwpIdleInhibitManagerV1, ()> for MatchaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &ZwpIdleInhibitManagerV1,
         _event: zwp_idle_inhibit_manager_v1::Event,
         _data: &(),
-        _conn: &Connection,
+        _conn: &WaylandConnection,
         _qh: &QueueHandle<Self>,
     ) {
     }
 }
+
 impl Dispatch<ZwpIdleInhibitorV1, ()> for MatchaWaylandState {
     fn event(
         _state: &mut Self,
         _proxy: &ZwpIdleInhibitorV1,
         _event: zwp_idle_inhibitor_v1::Event,
         _data: &(),
-        _conn: &Connection,
+        _conn: &WaylandConnection,
         _qh: &QueueHandle<Self>,
     ) {
     }
 }
 
-fn get_shared_mem_data(shmem: &mut Shmem) -> Result<SharedMemData> {
-    // Easiest is to copy from the raw pointer.
-    let shmem_ptr = shmem.as_ptr();
-    let data = unsafe { ptr::read_volatile(shmem_ptr as *const SharedMemData) };
-    Ok(data)
+// D-Bus interface for the idle inhibitor
+struct IdleInhibitorInterface {
+    sender: mpsc::UnboundedSender<InhibitorMessage>,
+    status: Arc<AtomicBool>,
 }
 
-fn set_shared_mem_data(shmem: &mut Shmem, data: &SharedMemData) -> Result<()> {
-    let shmem_ptr = shmem.as_ptr() as *mut SharedMemData;
-    unsafe { ptr::write_volatile(shmem_ptr, *data) };
-    Ok(())
-}
-
-fn daemon_mode(start_inhibited: bool) -> Result<()> {
-    log::info!(
-        "Starting daemon mode. Initial inhibition: {}",
-        start_inhibited
-    );
-
-    // --- Shared Memory Setup ---
-    let mut shmem = ShmemConf::new()
-        .size(mem::size_of::<SharedMemData>())
-        .flink(SHARED_MEM_NAME)
-        .create()
-        .context("Failed to create shared memory. Another instance running?")?;
-
-    let initial_shmem_data = SharedMemData {
-        inhibit: start_inhibited,
-    };
-    set_shared_mem_data(&mut shmem, &initial_shmem_data)?;
-    log::debug!("Initialized shared memory with: {:?}", initial_shmem_data);
-
-    // --- Signal File Setup ---
-    // Remove existing signal file
-    let _ = std::fs::remove_file(SIGNAL_FILE);
-
-    // Create signal file
-    std::fs::File::create(SIGNAL_FILE).context("Failed to create signal file")?;
-
-    // --- Signal Handling Setup ---
-    let signal_state = Arc::new(AtomicU8::new(AppSignalState::Inhibit as u8)); // Start with assuming inhibit based on logic flow
-    let term_signal_received = Arc::new(AtomicBool::new(false));
-
-    let mut signals =
-        Signals::new(&[SIGUSR1, SIGINT, SIGTERM]).context("Failed to register signal handlers")?;
-
-    let signal_state_clone = Arc::clone(&signal_state);
-    let term_signal_clone = Arc::clone(&term_signal_received);
-
-    std::thread::spawn(move || {
-        for signal in signals.forever() {
-            match signal {
-                SIGUSR1 => {
-                    log::info!("SIGUSR1 received, toggling internal signal state.");
-                    let current =
-                        AppSignalState::from_u8(signal_state_clone.load(Ordering::SeqCst));
-                    if current == AppSignalState::Inhibit {
-                        signal_state_clone.store(AppSignalState::Uninhibit as u8, Ordering::SeqCst);
-                    } else if current == AppSignalState::Uninhibit {
-                        // Only toggle between Inhibit and Uninhibit
-                        signal_state_clone.store(AppSignalState::Inhibit as u8, Ordering::SeqCst);
-                    }
-                }
-                SIGINT | SIGTERM => {
-                    log::info!("SIGINT/SIGTERM received, initiating shutdown.");
-                    signal_state_clone.store(AppSignalState::Kill as u8, Ordering::SeqCst);
-                    term_signal_clone.store(true, Ordering::SeqCst);
-                    // Signal the main loop by touching the signal file
-                    let _ = std::fs::write(SIGNAL_FILE, b"kill");
-                    break; // Exit signal handling thread
-                }
-                _ => log::warn!("Received unhandled signal: {}", signal),
-            }
+#[interface(name = "org.matcha.IdleInhibitor")]
+impl IdleInhibitorInterface {
+    /// Enable idle inhibition
+    fn enable(&self) -> zbus::fdo::Result<()> {
+        log::info!("D-Bus: Enable method called");
+        if let Err(e) = self.sender.send(InhibitorMessage::Enable) {
+            log::error!("Failed to send enable message: {}", e);
+            return Err(zbus::fdo::Error::Failed(format!("Failed to send enable message: {}", e)));
         }
-    });
+        Ok(())
+    }
 
-    // --- Wayland Setup ---
-    let conn = Connection::connect_to_env().context("Failed to connect to Wayland display")?;
+    /// Disable idle inhibition
+    fn disable(&self) -> zbus::fdo::Result<()> {
+        log::info!("D-Bus: Disable method called");
+        if let Err(e) = self.sender.send(InhibitorMessage::Disable) {
+            log::error!("Failed to send disable message: {}", e);
+            return Err(zbus::fdo::Error::Failed(format!("Failed to send disable message: {}", e)));
+        }
+        Ok(())
+    }
+
+    /// Get the current status of idle inhibition
+    #[zbus(property)]
+    fn status(&self) -> bool {
+        self.status.load(Ordering::Relaxed)
+    }
+}
+
+async fn setup_wayland() -> Result<(
+    WaylandConnection,
+    wayland_client::EventQueue<MatchaWaylandState>,
+    MatchaWaylandState,
+)> {
+    let conn = WaylandConnection::connect_to_env().context("Failed to connect to Wayland display")?;
     let display = conn.display();
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
@@ -324,7 +240,7 @@ fn daemon_mode(start_inhibited: bool) -> Result<()> {
         bail!("Failed to get wl_compositor");
     }
     if matcha_state.idle_inhibit_manager.is_none() {
-        bail!("Failed to get zwp_idle_inhibit_manager_v1. Is your compositor sway or similar supporting this protocol?");
+        bail!("Failed to get zwp_idle_inhibit_manager_v1. Is your compositor supporting this protocol?");
     }
 
     let surface = matcha_state
@@ -333,179 +249,184 @@ fn daemon_mode(start_inhibited: bool) -> Result<()> {
         .unwrap()
         .create_surface(&qh, ());
     matcha_state.surface = Some(surface);
+    
     // Initial commit might be needed by some compositors for the surface to be valid
     if let Some(s) = &matcha_state.surface {
         s.commit();
     }
     event_queue.blocking_dispatch(&mut matcha_state)?;
 
-    // --- Main Loop ---
-    // Initialize internal state based on shared memory.
-    // This 'signal_state' is influenced by actual signals (SIGUSR1)
-    // and the 'shmem_data.inhibit' is influenced by the toggle command.
-    // The effective inhibition depends on both.
-    if start_inhibited {
-        matcha_state
-            .create_inhibitor(&qh)
-            .context("Failed to create initial inhibitor")?;
-        signal_state.store(AppSignalState::Inhibit as u8, Ordering::SeqCst);
-        log::info!("Daemon started with inhibitor ON");
-        println!("inhibit|bool|true");
-        std::io::stdout().flush()?;
-    } else {
-        // No inhibitor created initially
-        signal_state.store(AppSignalState::Uninhibit as u8, Ordering::SeqCst);
-        log::info!("Daemon started with inhibitor OFF");
-        println!("inhibit|bool|false");
-        std::io::stdout().flush()?;
-    }
-    event_queue.blocking_dispatch(&mut matcha_state)?;
+    Ok((conn, event_queue, matcha_state))
+}
 
-    log::info!("Daemon running. Waiting for signals or file changes.");
-    let mut last_modified = std::fs::metadata(SIGNAL_FILE)
-        .ok()
-        .and_then(|m| m.modified().ok());
-
-    while AppSignalState::from_u8(signal_state.load(Ordering::Relaxed)) != AppSignalState::Kill {
-        // Check for termination signal
-        if term_signal_received.load(Ordering::Relaxed) {
-            log::info!("Termination signal received, exiting loop.");
+async fn wayland_event_loop(
+    mut event_queue: wayland_client::EventQueue<MatchaWaylandState>,
+    mut matcha_state: MatchaWaylandState,
+    mut receiver: mpsc::UnboundedReceiver<InhibitorMessage>,
+    status: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    let qh = event_queue.handle();
+    
+    log::info!("Starting Wayland event loop");
+    
+    loop {
+        // Check for shutdown signal
+        if shutdown.load(Ordering::Relaxed) {
+            log::info!("Shutdown signal received, cleaning up Wayland resources");
             break;
         }
 
-        // Check if signal file was modified (indicates toggle command)
-        if let Ok(metadata) = std::fs::metadata(SIGNAL_FILE) {
-            if let Ok(modified) = metadata.modified() {
-                if last_modified.map_or(true, |last| modified > last) {
-                    last_modified = Some(modified);
-                    // File was modified, continue to process state change
+        // Process Wayland events
+        if let Err(e) = event_queue.dispatch_pending(&mut matcha_state) {
+            log::error!("Error dispatching Wayland events: {}", e);
+        }
+
+        // Handle D-Bus messages
+        while let Ok(message) = receiver.try_recv() {
+            match message {
+                InhibitorMessage::Enable => {
+                    if !matcha_state.is_inhibited() {
+                        if let Err(e) = matcha_state.create_inhibitor(&qh) {
+                            log::error!("Failed to create inhibitor: {}", e);
+                        } else {
+                            status.store(true, Ordering::Relaxed);
+                            log::info!("Idle inhibition enabled");
+                        }
+                    }
+                }
+                InhibitorMessage::Disable => {
+                    if matcha_state.is_inhibited() {
+                        matcha_state.destroy_inhibitor();
+                        status.store(false, Ordering::Relaxed);
+                        log::info!("Idle inhibition disabled");
+                    }
+                }
+                InhibitorMessage::Shutdown => {
+                    log::info!("Shutdown message received");
+                    shutdown.store(true, Ordering::Relaxed);
+                    break;
                 }
             }
         }
 
-        // Sleep briefly to avoid busy waiting
-        std::thread::sleep(Duration::from_millis(100));
-
-        // Process Wayland events that might have accumulated
-        event_queue.dispatch_pending(&mut matcha_state)?;
-
-        let current_sig_state = AppSignalState::from_u8(signal_state.load(Ordering::SeqCst));
-        if current_sig_state == AppSignalState::Kill {
-            log::debug!("Kill signal detected in main loop.");
-            break;
-        }
-
-        let shmem_data =
-            get_shared_mem_data(&mut shmem).context("Failed to read shared memory in loop")?;
-        log::debug!(
-            "Loop: signal_state={:?}, shmem_data.inhibit={}",
-            current_sig_state,
-            shmem_data.inhibit
-        );
-
-        // Determine desired state:
-        // - If SIGUSR1 toggled to UNINHIBIT, or toggle command set shmem to false: turn off inhibitor
-        // - Else (SIGUSR1 toggled to INHIBIT and toggle command set shmem to true): turn on inhibitor
-        let should_inhibit = shmem_data.inhibit && (current_sig_state == AppSignalState::Inhibit);
-
-        if should_inhibit {
-            if matcha_state.inhibitor.is_none() {
-                log::info!("Activating inhibitor due to state change.");
-                matcha_state
-                    .create_inhibitor(&qh)
-                    .context("Failed to create inhibitor in loop")?;
-                event_queue.blocking_dispatch(&mut matcha_state)?;
-                println!("inhibit|bool|true");
-                std::io::stdout().flush()?;
-            }
-        } else {
-            if matcha_state.inhibitor.is_some() {
-                log::info!("Deactivating inhibitor due to state change.");
-                matcha_state.destroy_inhibitor();
-                event_queue.blocking_dispatch(&mut matcha_state)?;
-                println!("inhibit|bool|false");
-                std::io::stdout().flush()?;
-            }
-        }
+        // Small sleep to prevent busy waiting
+        sleep(Duration::from_millis(10)).await;
     }
 
-    log::info!("Daemon shutting down...");
     matcha_state.cleanup();
-    event_queue.blocking_dispatch(&mut matcha_state).ok(); // Final flush
-
-    let _ = ShmemConf::new()
-        .flink(SHARED_MEM_NAME)
-        .open()
-        .map(|shm| drop(shm)); // Just drop it, no set_removed_on_drop method
-    let _ = std::fs::remove_file(SIGNAL_FILE);
-    log::info!("Cleanup complete. Exiting.");
     Ok(())
 }
 
-fn toggle_mode() -> Result<()> {
-    log::debug!("Toggle mode: Connecting to shared memory and signal file.");
-    let mut shmem = ShmemConf::new()
-        .flink(SHARED_MEM_NAME)
-        .open()
-        .context("Failed to open shared memory. Is the daemon running?")?;
-
-    let mut data =
-        get_shared_mem_data(&mut shmem).context("Failed to read shared memory for toggle")?;
-    data.inhibit = !data.inhibit;
-    set_shared_mem_data(&mut shmem, &data).context("Failed to write shared memory for toggle")?;
-
-    // Signal the daemon by writing to the signal file
-    std::fs::write(SIGNAL_FILE, b"toggle").context("Failed to write to signal file")?;
-
-    log::info!(
-        "Toggled inhibit state to: {}. Signal file updated.",
-        data.inhibit
-    );
-    println!(
-        "Set inhibit to: {}",
-        if data.inhibit { "on" } else { "off" }
-    );
-    Ok(())
-}
-
-fn status_mode() -> Result<()> {
-    log::debug!("Status mode: Connecting to shared memory.");
-    let mut shmem = ShmemConf::new()
-        .flink(SHARED_MEM_NAME)
-        .open()
-        .context("Failed to open shared memory. Is the daemon running?")?;
-
-    let data =
-        get_shared_mem_data(&mut shmem).context("Failed to read shared memory for status")?;
-    println!("{}", if data.inhibit { "on" } else { "off" });
-    Ok(())
-}
-
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
 
-    let mode_count = [args.daemon, args.toggle, args.status]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+    log::info!("Starting Matcha Idle Inhibitor D-Bus service");
 
-    if mode_count != 1 {
-        eprintln!("ERROR: You must specify exactly one of --daemon, --toggle, or --status.\n");
-        eprintln!("{}", HELP_MSG);
-        process::exit(1);
+    // Set up Wayland
+    let (_wayland_conn, event_queue, matcha_state) = setup_wayland().await?;
+
+    // Should be debug
+    log::info!("Wayland setup done");
+
+    // Set up communication channels
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let status = Arc::new(AtomicBool::new(false)); // Start with inhibition OFF
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Should be debug
+    log::info!("Comm channel setup done");
+
+    // Set up D-Bus service
+    let idle_inhibitor = IdleInhibitorInterface {
+        sender: sender.clone(),
+        status: Arc::clone(&status),
+    };
+
+    // Should be debug
+    log::info!("Inhibitor interface setup done");
+
+    let dbus_connection = match timeout(
+            Duration::from_secs(5), 
+            ConnectionBuilder::session()?
+                .name(DBUS_SERVICE_NAME)?
+                .serve_at(DBUS_OBJECT_PATH, idle_inhibitor)?
+                .build()
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                log::error!("D-Bus connection timed out after 5 seconds");
+                bail!("D-Bus connection timed out");
+            }
+        };
+
+    log::info!("D-Bus service started at {} on {}", DBUS_SERVICE_NAME, DBUS_OBJECT_PATH);
+
+    // Set up signal handling
+    let signals = Signals::new(&[SIGINT, SIGTERM])?;
+    let shutdown_clone = Arc::clone(&shutdown);
+    let sender_clone = sender.clone();
+
+    tokio::spawn(async move {
+        signals.for_each(|signal| {
+            let shutdown_clone = shutdown_clone.clone();
+            let sender_clone = sender_clone.clone();
+            async move {
+                match signal {
+                    SIGINT | SIGTERM => {
+                        log::info!("Received termination signal, shutting down");
+                        shutdown_clone.store(true, Ordering::Relaxed);
+                        let _ = sender_clone.send(InhibitorMessage::Shutdown);
+                    }
+                    _ => {}
+                }
+            }
+        }).await;
+    });
+
+    // Run the Wayland event loop
+    let wayland_task = tokio::spawn(wayland_event_loop(
+        event_queue,
+        matcha_state,
+        receiver,
+        status,
+        Arc::clone(&shutdown),
+    ));
+
+    // Keep the D-Bus connection alive by spawning a task
+    let shutdown_clone_dbus = Arc::clone(&shutdown);
+    let dbus_task = tokio::spawn(async move {
+        // Keep the connection alive by waiting for it to close
+        let _connection = dbus_connection;
+        log::info!("D-Bus connection established successfully");
+
+        // Wait for shutdown signal
+        while !shutdown_clone_dbus.load(Ordering::Relaxed) {
+            // Don't call any methods that would close the connection
+            // Just sleep and keep the connection in scope
+            sleep(Duration::from_millis(100)).await;
+        }
+        log::info!("D-Bus connection task shutting down");
+    });
+
+    // Wait for either task to finish or a shutdown signal
+    tokio::select! {
+        result = wayland_task => {
+            match result {
+                Ok(Ok(())) => log::info!("Wayland event loop finished successfully"),
+                Ok(Err(e)) => log::error!("Wayland event loop error: {}", e),
+                Err(e) => log::error!("Wayland task join error: {}", e),
+            }
+        }
+        result = dbus_task => {
+            match result {
+                Ok(()) => log::info!("D-Bus task finished successfully"),
+                Err(e) => log::error!("D-Bus task join error: {}", e),
+            }
+        }
     }
 
-    if args.daemon {
-        let start_inhibited = !args.off;
-        daemon_mode(start_inhibited)
-    } else if args.toggle {
-        toggle_mode()
-    } else if args.status {
-        status_mode()
-    } else {
-        // Should be caught by mode_count, but as a fallback:
-        eprintln!("{}", HELP_MSG);
-        process::exit(1);
-    }
+    log::info!("Matcha Idle Inhibitor service stopped");
+    Ok(())
 }
