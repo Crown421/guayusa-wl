@@ -26,13 +26,23 @@ fn flush_and_dispatch(
     event_queue: &mut wayland_client::EventQueue<GuayusaWaylandState>,
     state: &mut GuayusaWaylandState,
     context: &str,
-) {
-    if let Err(e) = event_queue.flush() {
-        log::error!("Error flushing Wayland connection after {}: {}", context, e);
+    needs_flush: bool,
+) -> Result<()> {
+    // Only flush when needed (after state changes)
+    if needs_flush {
+        if let Err(e) = event_queue.flush() {
+            log::error!("Error flushing Wayland connection after {}: {}", context, e);
+            return Err(anyhow::anyhow!("Flush error: {}", e));
+        }
     }
+
+    // Always dispatch pending events to keep the event queue processed
     if let Err(e) = event_queue.dispatch_pending(state) {
         log::error!("Error dispatching events after {}: {}", context, e);
+        return Err(anyhow::anyhow!("Dispatch error: {}", e));
     }
+
+    Ok(())
 }
 
 // Wayland state structure
@@ -292,7 +302,7 @@ pub async fn wayland_event_loop(
                                 if let Err(e) = guayusa_state.create_inhibitor(&qh) {
                                     log::error!("Failed to create inhibitor: {}", e);
                                 } else {
-                                    flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor enable");
+                                    let _ = flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor enable", true);
                                     status.store(true, Ordering::Relaxed);
                                     log::info!("Idle inhibition enabled");
                                 }
@@ -301,7 +311,7 @@ pub async fn wayland_event_loop(
                         InhibitorMessage::Disable => {
                             if guayusa_state.is_inhibited() {
                                 guayusa_state.destroy_inhibitor();
-                                flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor disable");
+                                let _ = flush_and_dispatch(&mut event_queue, &mut guayusa_state, "inhibitor disable", true);
                                 status.store(false, Ordering::Relaxed);
                                 log::info!("Idle inhibition disabled");
                             }
