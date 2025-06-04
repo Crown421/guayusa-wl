@@ -9,7 +9,8 @@ jobs:
   build_and_package:
     runs-on: ubuntu-latest
     container: rust:1.87
-
+    permissions:
+      contents: write
     steps:
     - name: Install GPG and RPM signing tools
       run: |
@@ -48,9 +49,9 @@ jobs:
       run: cargo generate-rpm
 
     - name: Release
-        uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
-        with:
-          files: |
-            target/generate-rpm/*.rpm
+      uses: softprops/action-gh-release@v2
+      if: github.ref_type == 'tag'
+      with:
+        files: |
+          target/generate-rpm/*.rpm
 
