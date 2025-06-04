@@ -1,6 +1,6 @@
 [Unit]
 Description=A D-Bus controllable idle inhibitor for Wayland
-Documentation=Tbd
+Documentation=https://github.com/Crown421/guayusa-wl
 PartOf=graphical-session.target
 After=graphical-session.target
 Requisite=graphical-session.target
