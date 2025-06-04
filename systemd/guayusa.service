@@ -1,0 +1,13 @@
+[Unit]
+Description=A D-Bus controllable idle inhibitor for Wayland
+Documentation=Tbd
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/guayusa
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
