@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{signal, sync::mpsc};
+use tokio::{signal, sync::Notify, sync::mpsc};
 
 // Message types for internal communication
 #[derive(Debug, Clone)]
@@ -29,7 +29,8 @@ async fn main() -> Result<()> {
     // Set up communication channels
     let (sender, receiver) = mpsc::unbounded_channel();
     let status = Arc::new(AtomicBool::new(false)); // Start with inhibition OFF
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let wayland_shutdown_signal = Arc::new(AtomicBool::new(false)); // For Wayland loop
+    let dbus_shutdown_notify = Arc::new(Notify::new()); // For D-Bus task
 
     log::debug!("Comm channel setup done");
 
@@ -39,7 +40,8 @@ async fn main() -> Result<()> {
     log::debug!("D-Bus service setup done");
 
     // Set up signal handling
-    let shutdown_clone = Arc::clone(&shutdown);
+    let wayland_shutdown_signal_clone = Arc::clone(&wayland_shutdown_signal);
+    let dbus_shutdown_notify_clone = Arc::clone(&dbus_shutdown_notify);
 
     tokio::spawn(async move {
         let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt()).unwrap();
@@ -50,7 +52,8 @@ async fn main() -> Result<()> {
             _ = sigterm.recv() => log::info!("Received SIGTERM, shutting down"),
         }
 
-        shutdown_clone.store(true, Ordering::Relaxed);
+        wayland_shutdown_signal_clone.store(true, Ordering::Relaxed);
+        dbus_shutdown_notify_clone.notify_one(); // Notify D-Bus task to shut down
     });
 
     // Run the Wayland event loop
@@ -60,14 +63,13 @@ async fn main() -> Result<()> {
         guayusa_state,
         receiver,
         status,
-        Arc::clone(&shutdown),
+        Arc::clone(&wayland_shutdown_signal),
     ));
 
     // Keep the D-Bus connection alive by spawning a task
-    let shutdown_clone_dbus = Arc::clone(&shutdown);
     let dbus_task = tokio::spawn(dbus::dbus_connection_task(
         dbus_connection,
-        shutdown_clone_dbus,
+        Arc::clone(&dbus_shutdown_notify),
     ));
 
     // Wait for either task to finish or a shutdown signal

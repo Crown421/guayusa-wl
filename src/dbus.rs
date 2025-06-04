@@ -6,7 +6,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{sync::mpsc, time::sleep, time::timeout};
+use tokio::{sync::Notify, sync::mpsc, time::timeout};
 use zbus::{Connection, interface};
 
 use crate::InhibitorMessage;
@@ -103,16 +103,13 @@ pub async fn setup_dbus_service(
     Ok(dbus_connection)
 }
 
-pub async fn dbus_connection_task(connection: zbus::Connection, shutdown: Arc<AtomicBool>) {
-    // Keep the connection alive by waiting for it to close
+pub async fn dbus_connection_task(connection: zbus::Connection, shutdown_notify: Arc<Notify>) {
+    // Keep the connection alive by keeping it in scope
     let _connection = connection;
-    log::info!("D-Bus connection established successfully");
+    log::info!("D-Bus connection task started, waiting for shutdown signal");
 
-    // Wait for shutdown signal
-    while !shutdown.load(Ordering::Relaxed) {
-        // Don't call any methods that would close the connection
-        // Just sleep and keep the connection in scope
-        sleep(Duration::from_millis(500)).await;
-    }
+    // Wait for the shutdown notification. This is very CPU efficient.
+    shutdown_notify.notified().await;
+
     log::info!("D-Bus connection task shutting down");
 }
