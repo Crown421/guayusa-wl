@@ -12,14 +12,6 @@ jobs:
       run: |
         apt-get update
         apt-get install -y gnupg rpm
-      
-    - name: Sigh
-      run: |
-        echo "Importing GPG key..."
-        echo "$GPG_PUBLIC_KEY" > keyfile.asc
-        
-        rpm --import keyfile.asc
-        rm keyfile.asc
 
     - name: Checkout code
       uses: actions/checkout@v4
@@ -52,26 +44,3 @@ jobs:
     - name: Generate RPM package
       run: cargo generate-rpm
 
-    - name: Sign RPM
-      env:
-        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-      run: |
-        echo "Importing GPG key..."
-        echo "$GPG_PUBLIC_KEY" > RPM-GPG-KEY-pmanager
-        
-        rpm --import RPM-GPG-KEY-pmanager
-        rm RPM-GPG-KEY-pmanager
-        
-        echo "Configuring .rpmmacros for signing..."
-        echo "%_signature gpg" > ~/.rpmmacros
-        echo "%_gpg_name Package Signing Key (RPM) >> ~/.rpmmacros
-        echo "%_gpgbin $(which gpg)" >> ~/.rpmmacros
-
-        RPM_FILE_PATH="target/generate-rpm"
-        RPM_FILE=$(find "$RPM_FILE_PATH" -name "*.rpm" -print -quit)
-
-        echo "Found RPM: $RPM_FILE, attempting to sign..."
-        echo "${GPG_PASSPHRASE}" | rpmsign --addsign "$RPM_FILE"
-
-        echo "Verifying"
-        rpm --checksig "$RPM_FILE"
