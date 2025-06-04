@@ -1,5 +1,5 @@
 [package]
-name = "guayusa"
+name = "guayusa-wl"
 version = "0.1.0"
 description = "A D-Bus controllable idle inhibitor for Wayland"
 authors = ["Steffen Ridderbusch <steffen@robots.ox.ac.uk>"]
@@ -37,7 +37,7 @@ wayland-scanner = "0.31"
 
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/x86_64-unknown-linux-gnu/release/guayusa", dest = "/usr/bin/guayusa", mode = "755" }, # Adjust 'source' if your binary path/name is different
+    { source = "target/x86_64-unknown-linux-gnu/release/guayusa-wl", dest = "/usr/bin/guayusa", mode = "755" }, # Adjust 'source' if your binary path/name is different
     { source = "systemd/guayusa.service", dest = "/usr/lib/systemd/user/guayusa.service", mode = "644" },
 ]
 

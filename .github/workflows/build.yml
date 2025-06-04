@@ -1,0 +1,95 @@
+name: Build
+
+on: [push, pull_request]
+
+jobs:
+  build_and_package:
+    runs-on: ubuntu-latest
+    container: rust:1.87
+
+    steps:
+    - name: Install GPG and RPM signing tools
+      run: |
+        apt-get update
+        apt-get install -y gnupg rpm
+
+    - name: Import GPG key and Configure RPM signing
+      env:
+        GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      run: |
+        echo "Importing GPG key..."
+        echo "$GPG_PRIVATE_KEY" > /tmp/private_key.asc
+        cat /tmp/private_key.asc | grep -c "BEGIN PGP PRIVATE KEY BLOCK" || echo "Key header missing!"
+        
+        echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 --import /tmp/private_key.asc
+        rm /tmp/private_key.asc
+
+        GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep '^sec ' | tail -n 1 | awk '{print $2}' | cut -d'/' -f2)
+
+        if [ -z "$GPG_KEY_ID" ]; then
+          echo "Could not determine GPG Key ID from imported keys."
+          exit 1  # Added exit code to fail the workflow if key import fails
+        fi
+        echo "Using GPG Key ID for signing: $GPG_KEY_ID"
+
+        echo "Configuring .rpmmacros for signing..."
+        echo "%_signature gpg" > ~/.rpmmacros
+        echo "%_gpg_name $GPG_KEY_ID" >> ~/.rpmmacros
+        echo "%_gpgbin $(which gpg)" >> ~/.rpmmacros
+
+    - name: GPG debugging
+      run: |
+        echo "GPG binary location: $(which gpg)"
+        echo "RPM macro configuration:"
+        cat ~/.rpmmacros
+        
+        gpg --version
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Cache Cargo directories
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          target/ # Cache build target directory
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }} # Cache key
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Install cargo-generate-rpm
+      run: |
+        CARGO_GENERATE_RPM_VERSION="0.16.1" # Specify desired version
+        if ! command -v cargo-generate-rpm &> /dev/null || ! cargo-generate-rpm --version | grep -q "$CARGO_GENERATE_RPM_VERSION";
+        then
+            cargo install cargo-generate-rpm --version "$CARGO_GENERATE_RPM_VERSION" --locked
+        else
+            echo "cargo-generate-rpm version $CARGO_GENERATE_RPM_VERSION is already installed."
+        fi
+
+    - name: Build Rust binary
+      run: cargo build --release --target x86_64-unknown-linux-gnu # Adjust your target as needed
+
+    - name: Generate RPM package
+      run: cargo generate-rpm
+
+    
+
+    - name: Sign the RPM package
+      env:
+        # GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        GPG_TTY: /dev/null
+      run: |
+        RPM_FILE_PATH="target/generate-rpm"
+        RPM_FILE=$(find "$RPM_FILE_PATH" -name "*.rpm" -print -quit)
+
+        echo "Found RPM: $RPM_FILE, attempting to sign..."
+        rpmsign --addsign "$RPM_FILE"
+        
+        echo "RPM signing process completed for $RPM_FILE."
+        echo "Verifying RPM signature..."
+        rpm -K "$RPM_FILE"
