@@ -1,6 +1,9 @@
 name: Build
 
-on: [push, pull_request]
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
   build_and_package:
@@ -43,4 +46,11 @@ jobs:
 
     - name: Generate RPM package
       run: cargo generate-rpm
+
+    - name: Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: |
+            target/generate-rpm/*.rpm
 
