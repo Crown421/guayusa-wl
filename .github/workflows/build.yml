@@ -12,39 +12,14 @@ jobs:
       run: |
         apt-get update
         apt-get install -y gnupg rpm
-
-    - name: Import GPG key and Configure RPM signing
-      env:
-        GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      
+    - name: Sigh
       run: |
         echo "Importing GPG key..."
-        echo "$GPG_PRIVATE_KEY" > /tmp/private_key.asc
-        cat /tmp/private_key.asc | grep -c "BEGIN PGP PRIVATE KEY BLOCK" || echo "Key header missing!"
+        echo "$GPG_PUBLIC_KEY" > keyfile.asc
         
-        echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 --import /tmp/private_key.asc
-        rm /tmp/private_key.asc
-
-        GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep '^sec ' | tail -n 1 | awk '{print $2}' | cut -d'/' -f2)
-
-        if [ -z "$GPG_KEY_ID" ]; then
-          echo "Could not determine GPG Key ID from imported keys."
-          exit 1  # Added exit code to fail the workflow if key import fails
-        fi
-        echo "Using GPG Key ID for signing: $GPG_KEY_ID"
-
-        echo "Configuring .rpmmacros for signing..."
-        echo "%_signature gpg" > ~/.rpmmacros
-        echo "%_gpg_name $GPG_KEY_ID" >> ~/.rpmmacros
-        echo "%_gpgbin $(which gpg)" >> ~/.rpmmacros
-
-    - name: GPG debugging
-      run: |
-        echo "GPG binary location: $(which gpg)"
-        echo "RPM macro configuration:"
-        cat ~/.rpmmacros
-        
-        gpg --version
+        rpm --import keyfile.asc
+        rm keyfile.asc
 
     - name: Checkout code
       uses: actions/checkout@v4
@@ -77,19 +52,26 @@ jobs:
     - name: Generate RPM package
       run: cargo generate-rpm
 
-    
-
-    - name: Sign the RPM package
+    - name: Sign RPM
       env:
-        # GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        GPG_TTY: /dev/null
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       run: |
+        echo "Importing GPG key..."
+        echo "$GPG_PUBLIC_KEY" > RPM-GPG-KEY-pmanager
+        
+        rpm --import RPM-GPG-KEY-pmanager
+        rm RPM-GPG-KEY-pmanager
+        
+        echo "Configuring .rpmmacros for signing..."
+        echo "%_signature gpg" > ~/.rpmmacros
+        echo "%_gpg_name Package Signing Key (RPM) >> ~/.rpmmacros
+        echo "%_gpgbin $(which gpg)" >> ~/.rpmmacros
+
         RPM_FILE_PATH="target/generate-rpm"
         RPM_FILE=$(find "$RPM_FILE_PATH" -name "*.rpm" -print -quit)
 
         echo "Found RPM: $RPM_FILE, attempting to sign..."
-        rpmsign --addsign "$RPM_FILE"
-        
-        echo "RPM signing process completed for $RPM_FILE."
-        echo "Verifying RPM signature..."
-        rpm -K "$RPM_FILE"
+        echo "${GPG_PASSPHRASE}" | rpmsign --addsign "$RPM_FILE"
+
+        echo "Verifying"
+        rpm --checksig "$RPM_FILE"
