@@ -52,5 +52,4 @@ post_uninstall_script = """
 """
 
 [package.metadata.generate-rpm.requires]
-libc = "*"
 systemd = "*"
