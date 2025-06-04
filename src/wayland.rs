@@ -380,6 +380,33 @@ pub async fn wayland_event_loop(
                             log::debug!("Inhibitor already disabled, no action taken.");
                         }
                     }
+                    InhibitorMessage::Toggle => {
+                        let currently_inhibited = state.is_inhibited();
+                        log::debug!("Toggle called, current state: inhibited={}", currently_inhibited);
+
+                        if currently_inhibited {
+                            // Currently enabled, so disable
+                            state.destroy_inhibitor();
+                            if let Err(e) = flush_and_dispatch(queue, state, true) {
+                                log::error!("Error flushing after destroying inhibitor: {}", e);
+                            } else {
+                                status.store(false, Ordering::Relaxed);
+                                log::info!("Idle inhibition toggled: disabled");
+                            }
+                        } else {
+                            // Currently disabled, so enable
+                            if let Err(e) = state.create_inhibitor(&qh) {
+                                log::error!("Failed to create inhibitor: {}", e);
+                            } else {
+                                if let Err(e) = flush_and_dispatch(queue, state, true) {
+                                    log::error!("Error flushing after creating inhibitor: {}", e);
+                                } else {
+                                    status.store(true, Ordering::Relaxed);
+                                    log::info!("Idle inhibition toggled: enabled");
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

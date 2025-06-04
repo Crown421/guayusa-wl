@@ -64,6 +64,14 @@ impl IdleInhibitorInterface {
         self.send_message(message, context)
     }
 
+    /// Toggle idle inhibition state and return the new state
+    fn toggle(&self) -> zbus::fdo::Result<bool> {
+        log::debug!("D-Bus: Toggle method called");
+        self.send_message(InhibitorMessage::Toggle, "toggle")?;
+        // Return the new state after toggling
+        Ok(!self.status.load(Ordering::Relaxed))
+    }
+
     /// Get the current status of idle inhibition
     #[zbus(property)]
     fn status(&self) -> bool {

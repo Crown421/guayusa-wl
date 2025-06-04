@@ -13,6 +13,7 @@ use tokio::{signal, sync::Notify, sync::mpsc};
 pub enum InhibitorMessage {
     Enable,
     Disable,
+    Toggle,
 }
 
 #[tokio::main]
