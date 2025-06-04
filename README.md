@@ -1,6 +1,9 @@
-# guayusa-ws - Wayland Idle Inhibitor D-Bus Service
+# guayusa-wl
 
 A D-Bus service that prevents the compositor/desktop environment from going idle or engaging screen savers on Wayland compositors.
+
+Inspired by [matcha](https://codeberg.org/QuincePie/matcha) for the ilde inhibition, and [wl-gammarelay-rs](https://github.com/MaxVerevkin/wl-gammarelay-rs) for the D-Bus approach.
+Partially an attempt to play around with GitHub Copilot before the montly limits kicked in.
 
 ## Features
 
@@ -78,56 +81,6 @@ busctl --user get-property org.guayusa.IdleInhibitor / org.guayusa.Idle Status
 #### Monitor D-Bus signals (for debugging):
 ```bash
 busctl --user monitor org.guayusa.IdleInhibitor
-```
-
-### Control via gdbus (alternative)
-
-#### Enable idle inhibition:
-```bash
-gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.guayusa.Idle.Enable
-```
-
-#### Disable idle inhibition:
-```bash
-gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.guayusa.Idle.Disable
-```
-
-#### Toggle idle inhibition:
-```bash
-gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.guayusa.Idle.Toggle
-```
-
-#### Check current status:
-```bash
-gdbus call --session --dest org.guayusa.IdleInhibitor --object-path / --method org.freedesktop.DBus.Properties.Get org.guayusa.Idle Status
-```
-
-## Systemd Service (Optional)
-
-Create a user systemd service file at `~/.config/systemd/user/guayusad.service`:
-
-```ini
-[Unit]
-Description=Wayland Idle Inhibitor D-Bus Service
-After=graphical-session.target
-
-[Service]
-Type=simple
-ExecStart=/path/to/guayusad
-Restart=on-failure
-RestartSec=5
-Environment=WAYLAND_DISPLAY=wayland-0
-
-[Install]
-WantedBy=default.target
-```
-
-Then enable and start the service:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable guayusad.service
-systemctl --user start guayusad.service
 ```
 
 ## Requirements
