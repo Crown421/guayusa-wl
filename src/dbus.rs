@@ -152,7 +152,7 @@ pub async fn status_monitor_task(
                         if let Err(e) = connection.send(&signal_msg).await {
                             log::error!("Failed to emit status change signal: {}", e);
                         } else {
-                            log::info!("Emitted status change signal: enabled={}", current_status);
+                            log::debug!("Emitted status change signal: enabled={}", current_status);
                         }
                     }
                     Err(_) => {

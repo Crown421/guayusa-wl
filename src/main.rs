@@ -69,14 +69,13 @@ async fn main() -> Result<()> {
 
     // Keep the D-Bus connection alive by spawning a task
     let dbus_task = tokio::spawn(dbus::dbus_connection_task(
-        dbus_connection,
+        dbus_connection.clone(),
         Arc::clone(&dbus_shutdown_notify),
     ));
 
     // Start the status monitoring task with watch receiver
     let status_monitor_task = tokio::spawn(dbus::status_monitor_task(
-        // Create a new connection for the status monitor to avoid borrowing issues
-        zbus::Connection::session().await?,
+        dbus_connection.clone(),
         status_receiver,
         Arc::clone(&dbus_shutdown_notify),
     ));
