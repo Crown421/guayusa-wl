@@ -1,6 +1,6 @@
 [package]
 name = "guayusa-wl"
-version = "0.1.0"
+version = "0.1.1"
 description = "A D-Bus controllable idle inhibitor for Wayland"
 authors = ["Steffen Ridderbusch <steffen@robots.ox.ac.uk>"]
 edition = "2024"

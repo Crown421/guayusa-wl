@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{signal, sync::Notify, sync::mpsc};
+use tokio::{signal, sync::Notify, sync::mpsc, sync::watch};
 
 // Message types for internal communication
 #[derive(Debug, Clone)]
@@ -29,14 +29,14 @@ async fn main() -> Result<()> {
 
     // Set up communication channels
     let (sender, receiver) = mpsc::unbounded_channel();
-    let status = Arc::new(AtomicBool::new(false)); // Start with inhibition OFF
+    let (status_sender, status_receiver) = watch::channel(false); // Watch channel for status changes
     let wayland_shutdown_signal = Arc::new(AtomicBool::new(false)); // For Wayland loop
     let dbus_shutdown_notify = Arc::new(Notify::new()); // For D-Bus task
 
     log::debug!("Comm channel setup done");
 
     // Set up D-Bus service
-    let dbus_connection = dbus::setup_dbus_service(sender.clone(), Arc::clone(&status)).await?;
+    let dbus_connection = dbus::setup_dbus_service(sender.clone(), status_receiver.clone()).await?;
 
     log::debug!("D-Bus service setup done");
 
@@ -63,17 +63,24 @@ async fn main() -> Result<()> {
         event_queue,
         guayusa_state,
         receiver,
-        status,
+        status_sender.clone(),
         Arc::clone(&wayland_shutdown_signal),
     ));
 
     // Keep the D-Bus connection alive by spawning a task
     let dbus_task = tokio::spawn(dbus::dbus_connection_task(
-        dbus_connection,
+        dbus_connection.clone(),
         Arc::clone(&dbus_shutdown_notify),
     ));
 
-    // Wait for either task to finish or a shutdown signal
+    // Start the status monitoring task with watch receiver
+    let status_monitor_task = tokio::spawn(dbus::status_monitor_task(
+        dbus_connection.clone(),
+        status_receiver,
+        Arc::clone(&dbus_shutdown_notify),
+    ));
+
+    // Wait for any task to finish or a shutdown signal
     tokio::select! {
         result = wayland_task => {
             match result {
@@ -86,6 +93,12 @@ async fn main() -> Result<()> {
             match result {
                 Ok(()) => log::info!("D-Bus task finished successfully"),
                 Err(e) => log::error!("D-Bus task join error: {}", e),
+            }
+        }
+        result = status_monitor_task => {
+            match result {
+                Ok(()) => log::info!("Status monitor task finished successfully"),
+                Err(e) => log::error!("Status monitor task join error: {}", e),
             }
         }
     }

@@ -78,6 +78,11 @@ busctl --user call org.guayusa.IdleInhibitor / org.guayusa.Idle SetInhibit b fal
 busctl --user get-property org.guayusa.IdleInhibitor / org.guayusa.Idle Status
 ```
 
+#### Monitor status
+```bash
+dbus-monitor --session "type='signal',interface='org.guayusa.Idle',member='StatusChanged'"
+```
+
 #### Monitor D-Bus signals (for debugging):
 ```bash
 busctl --user monitor org.guayusa.IdleInhibitor

@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{io::unix::AsyncFd, sync::mpsc};
+use tokio::{io::unix::AsyncFd, sync::mpsc, sync::watch};
 
 use wayland_client::{
     Connection as WaylandConnection, Dispatch, QueueHandle,
@@ -293,7 +293,7 @@ pub async fn wayland_event_loop(
     event_queue: wayland_client::EventQueue<GuayusaWaylandState>,
     guayusa_state: GuayusaWaylandState,
     mut receiver: mpsc::UnboundedReceiver<InhibitorMessage>,
-    status: Arc<AtomicBool>,
+    status_sender: watch::Sender<bool>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let qh = event_queue.handle();
@@ -359,7 +359,7 @@ pub async fn wayland_event_loop(
                                 if let Err(e) = flush_and_dispatch(queue, state, true) {
                                     log::error!("Error flushing after creating inhibitor: {}", e);
                                 } else {
-                                    status.store(true, Ordering::Relaxed);
+                                    let _ = status_sender.send(true);
                                     log::info!("Idle inhibition enabled");
                                 }
                             }
@@ -373,7 +373,7 @@ pub async fn wayland_event_loop(
                             if let Err(e) = flush_and_dispatch(queue, state, true) {
                                 log::error!("Error flushing after destroying inhibitor: {}", e);
                             } else {
-                                status.store(false, Ordering::Relaxed);
+                                let _ = status_sender.send(false);
                                 log::info!("Idle inhibition disabled");
                             }
                         } else {
@@ -390,7 +390,7 @@ pub async fn wayland_event_loop(
                             if let Err(e) = flush_and_dispatch(queue, state, true) {
                                 log::error!("Error flushing after destroying inhibitor: {}", e);
                             } else {
-                                status.store(false, Ordering::Relaxed);
+                                let _ = status_sender.send(false);
                                 log::info!("Idle inhibition toggled: disabled");
                             }
                         } else {
@@ -401,7 +401,7 @@ pub async fn wayland_event_loop(
                                 if let Err(e) = flush_and_dispatch(queue, state, true) {
                                     log::error!("Error flushing after creating inhibitor: {}", e);
                                 } else {
-                                    status.store(true, Ordering::Relaxed);
+                                    let _ = status_sender.send(true);
                                     log::info!("Idle inhibition toggled: enabled");
                                 }
                             }
