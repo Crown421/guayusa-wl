@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{signal, sync::Notify, sync::mpsc};
+use tokio::{signal, sync::Notify, sync::mpsc, sync::watch};
 
 // Message types for internal communication
 #[derive(Debug, Clone)]
@@ -30,6 +30,7 @@ async fn main() -> Result<()> {
     // Set up communication channels
     let (sender, receiver) = mpsc::unbounded_channel();
     let status = Arc::new(AtomicBool::new(false)); // Start with inhibition OFF
+    let (status_sender, status_receiver) = watch::channel(false); // Watch channel for status changes
     let wayland_shutdown_signal = Arc::new(AtomicBool::new(false)); // For Wayland loop
     let dbus_shutdown_notify = Arc::new(Notify::new()); // For D-Bus task
 
@@ -64,6 +65,7 @@ async fn main() -> Result<()> {
         guayusa_state,
         receiver,
         Arc::clone(&status),
+        status_sender.clone(),
         Arc::clone(&wayland_shutdown_signal),
     ));
 
@@ -73,11 +75,11 @@ async fn main() -> Result<()> {
         Arc::clone(&dbus_shutdown_notify),
     ));
 
-    // Start the status monitoring task
+    // Start the status monitoring task with watch receiver
     let status_monitor_task = tokio::spawn(dbus::status_monitor_task(
         // Create a new connection for the status monitor to avoid borrowing issues
         zbus::Connection::session().await?,
-        Arc::clone(&status),
+        status_receiver,
         Arc::clone(&dbus_shutdown_notify),
     ));
 
