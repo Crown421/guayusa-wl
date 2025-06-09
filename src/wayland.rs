@@ -293,7 +293,6 @@ pub async fn wayland_event_loop(
     event_queue: wayland_client::EventQueue<GuayusaWaylandState>,
     guayusa_state: GuayusaWaylandState,
     mut receiver: mpsc::UnboundedReceiver<InhibitorMessage>,
-    status: Arc<AtomicBool>,
     status_sender: watch::Sender<bool>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -360,7 +359,6 @@ pub async fn wayland_event_loop(
                                 if let Err(e) = flush_and_dispatch(queue, state, true) {
                                     log::error!("Error flushing after creating inhibitor: {}", e);
                                 } else {
-                                    status.store(true, Ordering::Relaxed);
                                     let _ = status_sender.send(true);
                                     log::info!("Idle inhibition enabled");
                                 }
@@ -375,7 +373,6 @@ pub async fn wayland_event_loop(
                             if let Err(e) = flush_and_dispatch(queue, state, true) {
                                 log::error!("Error flushing after destroying inhibitor: {}", e);
                             } else {
-                                status.store(false, Ordering::Relaxed);
                                 let _ = status_sender.send(false);
                                 log::info!("Idle inhibition disabled");
                             }
@@ -393,7 +390,6 @@ pub async fn wayland_event_loop(
                             if let Err(e) = flush_and_dispatch(queue, state, true) {
                                 log::error!("Error flushing after destroying inhibitor: {}", e);
                             } else {
-                                status.store(false, Ordering::Relaxed);
                                 let _ = status_sender.send(false);
                                 log::info!("Idle inhibition toggled: disabled");
                             }
@@ -405,7 +401,6 @@ pub async fn wayland_event_loop(
                                 if let Err(e) = flush_and_dispatch(queue, state, true) {
                                     log::error!("Error flushing after creating inhibitor: {}", e);
                                 } else {
-                                    status.store(true, Ordering::Relaxed);
                                     let _ = status_sender.send(true);
                                     log::info!("Idle inhibition toggled: enabled");
                                 }

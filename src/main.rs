@@ -29,7 +29,6 @@ async fn main() -> Result<()> {
 
     // Set up communication channels
     let (sender, receiver) = mpsc::unbounded_channel();
-    let status = Arc::new(AtomicBool::new(false)); // Start with inhibition OFF
     let (status_sender, status_receiver) = watch::channel(false); // Watch channel for status changes
     let wayland_shutdown_signal = Arc::new(AtomicBool::new(false)); // For Wayland loop
     let dbus_shutdown_notify = Arc::new(Notify::new()); // For D-Bus task
@@ -37,7 +36,7 @@ async fn main() -> Result<()> {
     log::debug!("Comm channel setup done");
 
     // Set up D-Bus service
-    let dbus_connection = dbus::setup_dbus_service(sender.clone(), Arc::clone(&status)).await?;
+    let dbus_connection = dbus::setup_dbus_service(sender.clone(), status_receiver.clone()).await?;
 
     log::debug!("D-Bus service setup done");
 
@@ -64,7 +63,6 @@ async fn main() -> Result<()> {
         event_queue,
         guayusa_state,
         receiver,
-        Arc::clone(&status),
         status_sender.clone(),
         Arc::clone(&wayland_shutdown_signal),
     ));
