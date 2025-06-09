@@ -121,3 +121,48 @@ pub async fn dbus_connection_task(connection: zbus::Connection, shutdown_notify:
 
     log::info!("D-Bus connection task shutting down");
 }
+
+/// Task that monitors status changes and emits D-Bus signals
+pub async fn status_monitor_task(
+    connection: zbus::Connection,
+    status: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+) {
+    log::info!("Status monitor task started");
+
+    let mut last_status = status.load(Ordering::Relaxed);
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let current_status = status.load(Ordering::Relaxed);
+                if current_status != last_status {
+                    log::debug!("Status changed from {} to {}", last_status, current_status);
+
+                    // Emit the D-Bus signal using a simple approach
+                    let signal_msg = zbus::Message::signal(
+                        DBUS_OBJECT_PATH,
+                        "org.guayusa.Idle",
+                        "StatusChanged"
+                    )
+                    .unwrap()
+                    .build(&current_status)
+                    .unwrap();
+
+                    if let Err(e) = connection.send(&signal_msg).await {
+                        log::error!("Failed to emit status change signal: {}", e);
+                    } else {
+                        log::info!("Emitted status change signal: enabled={}", current_status);
+                    }
+
+                    last_status = current_status;
+                }
+            }
+            _ = shutdown_notify.notified() => {
+                log::info!("Status monitor task shutting down");
+                break;
+            }
+        }
+    }
+}

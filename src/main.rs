@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         event_queue,
         guayusa_state,
         receiver,
-        status,
+        Arc::clone(&status),
         Arc::clone(&wayland_shutdown_signal),
     ));
 
@@ -73,7 +73,15 @@ async fn main() -> Result<()> {
         Arc::clone(&dbus_shutdown_notify),
     ));
 
-    // Wait for either task to finish or a shutdown signal
+    // Start the status monitoring task
+    let status_monitor_task = tokio::spawn(dbus::status_monitor_task(
+        // Create a new connection for the status monitor to avoid borrowing issues
+        zbus::Connection::session().await?,
+        Arc::clone(&status),
+        Arc::clone(&dbus_shutdown_notify),
+    ));
+
+    // Wait for any task to finish or a shutdown signal
     tokio::select! {
         result = wayland_task => {
             match result {
@@ -86,6 +94,12 @@ async fn main() -> Result<()> {
             match result {
                 Ok(()) => log::info!("D-Bus task finished successfully"),
                 Err(e) => log::error!("D-Bus task join error: {}", e),
+            }
+        }
+        result = status_monitor_task => {
+            match result {
+                Ok(()) => log::info!("Status monitor task finished successfully"),
+                Err(e) => log::error!("Status monitor task join error: {}", e),
             }
         }
     }
