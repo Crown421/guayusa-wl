@@ -1,6 +1,6 @@
 [package]
 name = "guayusa-wl"
-version = "0.1.1"
+version = "0.1.2"
 description = "A D-Bus controllable idle inhibitor for Wayland"
 authors = ["Steffen Ridderbusch <steffen@robots.ox.ac.uk>"]
 edition = "2024"
@@ -11,18 +11,17 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["unstable", "client"] }
 zbus = { version = "5.7", default-features = false, features = ["tokio"] }
 tokio = { version = "1.0", default-features = false, features = [
-    "rt-multi-thread",
+    "rt",
     "macros",
     "signal",
     "io-util",
-    "fs",
 ] }
 anyhow = "1.0"
 # Use a lighter logging implementation
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
 # High-performance synchronization primitives
-parking_lot = "0.12"
+parking_lot = { version = "0.12", default-features = false }
 
 # Release profile optimizations for binary size
 [profile.release]
