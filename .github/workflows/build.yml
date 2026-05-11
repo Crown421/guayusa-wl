@@ -48,10 +48,18 @@ jobs:
     - name: Generate RPM package
       run: cargo generate-rpm
 
+    - name: Verify RPM scriptlets
+      run: |
+        mkdir -p "${RUNNER_TEMP}/rpmdb"
+        rpm --dbpath "${RUNNER_TEMP}/rpmdb" -qp --scripts target/generate-rpm/*.rpm
+        if rpm --dbpath "${RUNNER_TEMP}/rpmdb" -qp --scripts target/generate-rpm/*.rpm | grep -q '%systemd_user_'; then
+          echo "RPM contains unexpanded systemd user-service macros"
+          exit 1
+        fi
+
     - name: Release
       uses: softprops/action-gh-release@v2
       if: github.ref_type == 'tag'
       with:
         files: |
           target/generate-rpm/*.rpm
-

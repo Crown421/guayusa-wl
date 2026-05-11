@@ -1,6 +1,6 @@
 [package]
 name = "guayusa-wl"
-version = "0.1.2"
+version = "0.1.3"
 description = "A D-Bus controllable idle inhibitor for Wayland"
 authors = ["Steffen Ridderbusch <steffen@robots.ox.ac.uk>"]
 edition = "2024"
@@ -41,13 +41,16 @@ assets = [
 ]
 
 pre_uninstall_script = """
-%systemd_user_preun guayusa.service
+if [ $1 -eq 0 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then
+    # Package removal, not upgrade
+    /usr/lib/systemd/systemd-update-helper remove-user-units guayusa.service || :
+fi
 """
 post_install_script = """
-%systemd_user_post guayusa.service
-"""
-post_uninstall_script = """
-%systemd_user_postun guayusa.service
+if [ $1 -eq 1 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then
+    # Initial installation
+    /usr/lib/systemd/systemd-update-helper install-user-units guayusa.service || :
+fi
 """
 
 [package.metadata.generate-rpm.requires]
