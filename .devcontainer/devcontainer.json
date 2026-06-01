@@ -19,14 +19,5 @@
         "vscode": {
             "extensions": []
         }
-    },
-    "runArgs": [
-        "--userns=keep-id",
-        "--security-opt=label=disable"
-    ],
-    "containerEnv": {
-        "HOME": "/home/vscode"
-    },
-    "remoteUser": "vscode",
-    "containerUser": "vscode"
+    }
 }
