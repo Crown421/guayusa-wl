@@ -1,12 +1,11 @@
 [Unit]
-Description=A D-Bus controllable swayidle policy controller
-Documentation=https://github.com/Crown421/guayusa-wl
+Description=Guayusa swayidle before-sleep lock policy
 PartOf=graphical-session.target
 After=graphical-session.target
 Requisite=graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/guayusa
+ExecStart=/usr/bin/swayidle -w before-sleep 'swaylock -f' lock 'swaylock -f' unlock 'pkill -xu "$USER" -SIGUSR1 swaylock'
 Restart=on-failure
 
 [Install]

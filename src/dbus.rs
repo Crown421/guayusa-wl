@@ -1,92 +1,115 @@
 use anyhow::{Result, bail};
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::Notify, sync::mpsc, sync::watch, time::timeout};
-use zbus::{Connection, interface};
+use tokio::{sync::Notify, sync::watch};
+use zbus::{Connection, interface, object_server::SignalEmitter};
 
-use crate::InhibitorMessage;
+use crate::systemd::{Mode, SystemdController};
 
 const DBUS_OBJECT_PATH: &str = "/";
 const DBUS_SERVICE_NAME: &str = "org.guayusa.IdleInhibitor";
 
-// D-Bus interface for the idle inhibitor
 pub struct IdleInhibitorInterface {
-    sender: mpsc::UnboundedSender<InhibitorMessage>,
-    status_watch_rx: watch::Receiver<bool>,
+    controller: Arc<SystemdController>,
+    mode_watch_rx: watch::Receiver<Mode>,
 }
 
 impl IdleInhibitorInterface {
-    pub fn new(
-        sender: mpsc::UnboundedSender<InhibitorMessage>,
-        status_watch_rx: watch::Receiver<bool>,
-    ) -> Self {
+    pub fn new(controller: Arc<SystemdController>, mode_watch_rx: watch::Receiver<Mode>) -> Self {
         Self {
-            sender,
-            status_watch_rx,
+            controller,
+            mode_watch_rx,
         }
     }
 
-    /// Helper function to send messages with consistent error handling
-    fn send_message(&self, message: InhibitorMessage, context: &str) -> zbus::fdo::Result<()> {
-        if let Err(e) = self.sender.send(message) {
-            log::error!("Failed to send {} message: {}", context, e);
-            return Err(zbus::fdo::Error::Failed(format!(
-                "Failed to send {} message: {}",
-                context, e
-            )));
-        }
-        Ok(())
+    async fn set_controller_mode(&self, mode: Mode) -> zbus::fdo::Result<Mode> {
+        self.controller
+            .set_mode(mode)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 }
 
 #[interface(name = "org.guayusa.Idle")]
 impl IdleInhibitorInterface {
-    /// Enable idle inhibition
-    fn enable(&self) -> zbus::fdo::Result<()> {
+    async fn enable(&self) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: Enable method called");
-        self.send_message(InhibitorMessage::Enable, "enable")
+        self.set_controller_mode(Mode::NoIdle).await?;
+        Ok(())
     }
 
-    /// Disable idle inhibition
-    fn disable(&self) -> zbus::fdo::Result<()> {
+    async fn disable(&self) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: Disable method called");
-        self.send_message(InhibitorMessage::Disable, "disable")
+        self.set_controller_mode(Mode::Normal).await?;
+        Ok(())
     }
 
-    /// Set idle inhibition state (true = enable, false = disable)
-    fn set_inhibit(&self, enable: bool) -> zbus::fdo::Result<()> {
+    async fn set_inhibit(&self, enable: bool) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: SetInhibit method called with enable={}", enable);
-        let message = if enable {
-            InhibitorMessage::Enable
-        } else {
-            InhibitorMessage::Disable
-        };
-        let context = if enable { "enable" } else { "disable" };
-        self.send_message(message, context)
+        let mode = if enable { Mode::NoIdle } else { Mode::Normal };
+        self.set_controller_mode(mode).await?;
+        Ok(())
     }
 
-    /// Toggle idle inhibition state and return the new state
-    fn toggle(&self) -> zbus::fdo::Result<bool> {
+    async fn set_mode(&self, mode: &str) -> zbus::fdo::Result<()> {
+        log::debug!("D-Bus: SetMode method called with mode={}", mode);
+        let mode = Mode::parse_primary(mode).ok_or_else(|| {
+            zbus::fdo::Error::InvalidArgs(format!(
+                "invalid mode {mode}; expected normal, no-suspend, or no-idle"
+            ))
+        })?;
+        self.set_controller_mode(mode).await?;
+        Ok(())
+    }
+
+    async fn toggle(&self) -> zbus::fdo::Result<bool> {
         log::debug!("D-Bus: Toggle method called");
-        self.send_message(InhibitorMessage::Toggle, "toggle")?;
-        // Return the new state after toggling
-        Ok(!*self.status_watch_rx.borrow())
+        let current_mode = *self.mode_watch_rx.borrow();
+        let next_mode = if current_mode == Mode::Normal {
+            Mode::NoIdle
+        } else {
+            Mode::Normal
+        };
+        let mode = self.set_controller_mode(next_mode).await?;
+        Ok(mode.is_inhibited())
     }
 
-    /// Get the current status of idle inhibition
+    async fn cycle_mode(&self) -> zbus::fdo::Result<String> {
+        log::debug!("D-Bus: CycleMode method called");
+        let mode = self
+            .controller
+            .cycle_mode()
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        Ok(mode.as_str().to_string())
+    }
+
     #[zbus(property)]
     fn status(&self) -> bool {
-        *self.status_watch_rx.borrow()
+        self.mode_watch_rx.borrow().is_inhibited()
     }
+
+    #[zbus(property)]
+    fn mode(&self) -> String {
+        self.mode_watch_rx.borrow().as_str().to_string()
+    }
+
+    #[zbus(signal)]
+    #[zbus(name = "ModeChanged")]
+    async fn mode_changed_signal(emitter: &SignalEmitter<'_>, mode: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    #[zbus(name = "StatusChanged")]
+    async fn status_changed_signal(emitter: &SignalEmitter<'_>, status: bool) -> zbus::Result<()>;
 }
 
 pub async fn setup_dbus_service(
-    sender: mpsc::UnboundedSender<InhibitorMessage>,
-    status_watch_rx: watch::Receiver<bool>,
-) -> Result<zbus::Connection> {
-    let idle_inhibitor = IdleInhibitorInterface::new(sender, status_watch_rx);
+    connection: Connection,
+    controller: Arc<SystemdController>,
+    mode_watch_rx: watch::Receiver<Mode>,
+) -> Result<Connection> {
+    let idle_inhibitor = IdleInhibitorInterface::new(controller, mode_watch_rx);
 
-    let dbus_connection = match timeout(Duration::from_secs(5), async {
-        let connection = Connection::session().await?;
+    let dbus_connection = match tokio::time::timeout(Duration::from_secs(5), async {
         connection
             .object_server()
             .at(DBUS_OBJECT_PATH, idle_inhibitor)
@@ -98,8 +121,8 @@ pub async fn setup_dbus_service(
     {
         Ok(result) => result?,
         Err(_) => {
-            log::error!("D-Bus connection timed out after 5 seconds");
-            bail!("D-Bus connection timed out");
+            log::error!("D-Bus setup timed out after 5 seconds");
+            bail!("D-Bus setup timed out");
         }
     };
 
@@ -111,52 +134,48 @@ pub async fn setup_dbus_service(
     Ok(dbus_connection)
 }
 
-pub async fn dbus_connection_task(connection: zbus::Connection, shutdown_notify: Arc<Notify>) {
-    // Keep the connection alive by keeping it in scope
-    let _connection = connection;
+pub async fn dbus_connection_task(_connection: Connection, shutdown_notify: Arc<Notify>) {
     log::info!("D-Bus connection task started, waiting for shutdown signal");
-
-    // Wait for the shutdown notification. This is very CPU efficient.
     shutdown_notify.notified().await;
-
     log::info!("D-Bus connection task shutting down");
 }
 
-/// Event-driven task that monitors status changes and emits D-Bus signals
 pub async fn status_monitor_task(
-    connection: zbus::Connection,
-    mut status_receiver: watch::Receiver<bool>,
+    connection: Connection,
+    mut mode_receiver: watch::Receiver<Mode>,
     shutdown_notify: Arc<Notify>,
 ) {
-    log::info!("Event-driven status monitor task started");
+    log::info!("Status monitor task started");
+    let mut last_status = mode_receiver.borrow_and_update().is_inhibited();
+    let signal_emitter = match SignalEmitter::new(&connection, DBUS_OBJECT_PATH) {
+        Ok(emitter) => emitter,
+        Err(e) => {
+            log::error!("Unable to create D-Bus signal emitter: {}", e);
+            return;
+        }
+    };
 
     loop {
         tokio::select! {
-            // Wait for status changes
-            result = status_receiver.changed() => {
+            result = mode_receiver.changed() => {
                 match result {
                     Ok(()) => {
-                        let current_status = *status_receiver.borrow_and_update();
-                        log::debug!("Status changed, new value: {}", current_status);
+                        let current_mode = *mode_receiver.borrow_and_update();
+                        let mode_name = current_mode.as_str().to_string();
+                        let current_status = current_mode.is_inhibited();
 
-                        // Emit the D-Bus signal
-                        let signal_msg = zbus::Message::signal(
-                            DBUS_OBJECT_PATH,
-                            "org.guayusa.Idle",
-                            "StatusChanged"
-                        )
-                        .unwrap()
-                        .build(&current_status)
-                        .unwrap();
-
-                        if let Err(e) = connection.send(&signal_msg).await {
-                            log::error!("Failed to emit status change signal: {}", e);
-                        } else {
-                            log::debug!("Emitted status change signal: enabled={}", current_status);
+                        if let Err(e) = IdleInhibitorInterface::mode_changed_signal(&signal_emitter, &mode_name).await {
+                            log::error!("Failed to emit ModeChanged signal: {}", e);
+                        }
+                        if current_status != last_status {
+                            if let Err(e) = IdleInhibitorInterface::status_changed_signal(&signal_emitter, current_status).await {
+                                log::error!("Failed to emit StatusChanged signal: {}", e);
+                            }
+                            last_status = current_status;
                         }
                     }
                     Err(_) => {
-                        log::info!("Status watch channel closed, shutting down status monitor");
+                        log::info!("Mode watch channel closed, shutting down status monitor");
                         break;
                     }
                 }

@@ -1,49 +1,40 @@
 mod dbus;
-mod wayland;
+mod systemd;
 
 use anyhow::Result;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use tokio::{signal, sync::Notify, sync::mpsc, sync::watch};
+use std::sync::Arc;
+use tokio::{signal, sync::Notify, sync::watch};
+use zbus::Connection;
 
-// Message types for internal communication
-#[derive(Debug, Clone)]
-pub enum InhibitorMessage {
-    Enable,
-    Disable,
-    Toggle,
-}
+use systemd::{Mode, SystemdController};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    log::info!("Starting Guayusa Idle Inhibitor D-Bus service");
+    log::info!("Starting Guayusa D-Bus service");
 
-    // Set up Wayland
-    let (wayland_conn, event_queue, guayusa_state) = wayland::setup_wayland().await?;
+    let dbus_connection = Connection::session().await?;
+    let (mode_sender, mode_receiver) = watch::channel(Mode::Unavailable);
+    let shutdown_notify = Arc::new(Notify::new());
 
-    log::debug!("Wayland setup done");
+    let controller = Arc::new(SystemdController::new(
+        dbus_connection.clone(),
+        mode_sender.clone(),
+    ));
 
-    // Set up communication channels
-    let (sender, receiver) = mpsc::unbounded_channel();
-    let (status_sender, status_receiver) = watch::channel(false); // Watch channel for status changes
-    let wayland_shutdown_signal = Arc::new(AtomicBool::new(false)); // For Wayland loop
-    let dbus_shutdown_notify = Arc::new(Notify::new()); // For D-Bus task
+    if let Err(e) = controller.refresh_mode().await {
+        log::warn!("Unable to infer initial mode: {}", e);
+    }
 
-    log::debug!("Comm channel setup done");
+    let dbus_connection = dbus::setup_dbus_service(
+        dbus_connection,
+        Arc::clone(&controller),
+        mode_receiver.clone(),
+    )
+    .await?;
 
-    // Set up D-Bus service
-    let dbus_connection = dbus::setup_dbus_service(sender.clone(), status_receiver.clone()).await?;
-
-    log::debug!("D-Bus service setup done");
-
-    // Set up signal handling
-    let wayland_shutdown_signal_clone = Arc::clone(&wayland_shutdown_signal);
-    let dbus_shutdown_notify_clone = Arc::clone(&dbus_shutdown_notify);
-
+    let signal_shutdown_notify = Arc::clone(&shutdown_notify);
     tokio::spawn(async move {
         let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt()).unwrap();
         let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
@@ -53,56 +44,61 @@ async fn main() -> Result<()> {
             _ = sigterm.recv() => log::info!("Received SIGTERM, shutting down"),
         }
 
-        wayland_shutdown_signal_clone.store(true, Ordering::Relaxed);
-        dbus_shutdown_notify_clone.notify_one(); // Notify D-Bus task to shut down
+        signal_shutdown_notify.notify_waiters();
     });
 
-    // Run the Wayland event loop
-    let wayland_task = tokio::spawn(wayland::wayland_event_loop(
-        wayland_conn,
-        event_queue,
-        guayusa_state,
-        receiver,
-        status_sender.clone(),
-        Arc::clone(&wayland_shutdown_signal),
-    ));
-
-    // Keep the D-Bus connection alive by spawning a task
     let dbus_task = tokio::spawn(dbus::dbus_connection_task(
         dbus_connection.clone(),
-        Arc::clone(&dbus_shutdown_notify),
+        Arc::clone(&shutdown_notify),
     ));
 
-    // Start the status monitoring task with watch receiver
     let status_monitor_task = tokio::spawn(dbus::status_monitor_task(
         dbus_connection.clone(),
-        status_receiver,
-        Arc::clone(&dbus_shutdown_notify),
+        mode_receiver,
+        Arc::clone(&shutdown_notify),
     ));
 
-    // Wait for any task to finish or a shutdown signal
+    let state_poll_task = tokio::spawn(state_poll_task(
+        Arc::clone(&controller),
+        Arc::clone(&shutdown_notify),
+    ));
+
     tokio::select! {
-        result = wayland_task => {
-            match result {
-                Ok(Ok(())) => log::info!("Wayland event loop finished successfully"),
-                Ok(Err(e)) => log::error!("Wayland event loop error: {}", e),
-                Err(e) => log::error!("Wayland task join error: {}", e),
-            }
-        }
         result = dbus_task => {
-            match result {
-                Ok(()) => log::info!("D-Bus task finished successfully"),
-                Err(e) => log::error!("D-Bus task join error: {}", e),
+            if let Err(e) = result {
+                log::error!("D-Bus task join error: {}", e);
             }
         }
         result = status_monitor_task => {
-            match result {
-                Ok(()) => log::info!("Status monitor task finished successfully"),
-                Err(e) => log::error!("Status monitor task join error: {}", e),
+            if let Err(e) = result {
+                log::error!("Status monitor task join error: {}", e);
+            }
+        }
+        result = state_poll_task => {
+            if let Err(e) = result {
+                log::error!("State poll task join error: {}", e);
             }
         }
     }
 
-    log::info!("Guayusa Idle Inhibitor service stopped");
+    log::info!("Guayusa service stopped");
     Ok(())
+}
+
+async fn state_poll_task(controller: Arc<SystemdController>, shutdown_notify: Arc<Notify>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if let Err(e) = controller.refresh_mode().await {
+                    log::warn!("Unable to refresh mode: {}", e);
+                }
+            }
+            _ = shutdown_notify.notified() => {
+                log::info!("State poll task shutting down");
+                break;
+            }
+        }
+    }
 }

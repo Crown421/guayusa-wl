@@ -1,0 +1,12 @@
+[Unit]
+Description=Guayusa managed swayidle suspend policy
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+ExecStart=/bin/sh -c 'LT="${lock_timeout:-300}"; ST="${screen_timeout:-60}"; SD="${suspend_delay:-120}"; exec /usr/bin/swayidle -w timeout "$((LT + ST + SD))" "systemctl suspend"'
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

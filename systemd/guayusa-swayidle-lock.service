@@ -1,0 +1,12 @@
+[Unit]
+Description=Guayusa managed swayidle lock and display power policy
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+ExecStart=/bin/sh -c 'LT="${lock_timeout:-300}"; ST="${screen_timeout:-60}"; exec /usr/bin/swayidle -w timeout "$LT" "swaylock -f" timeout "$((LT + ST))" "swaymsg \"output * power off\"" resume "swaymsg \"output * power on\"" timeout "$ST" "pgrep -xu \"$USER\" swaylock >/dev/null && swaymsg \"output * power off\"" resume "pgrep -xu \"$USER\" swaylock >/dev/null && swaymsg \"output * power on\""'
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

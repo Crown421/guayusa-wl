@@ -1,27 +1,23 @@
 [package]
 name = "guayusa-wl"
-version = "0.1.3"
-description = "A D-Bus controllable idle inhibitor for Wayland"
+version = "0.2.0"
+description = "A D-Bus controllable swayidle policy controller"
 authors = ["Steffen Ridderbusch <steffen@robots.ox.ac.uk>"]
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["unstable", "client"] }
 zbus = { version = "5.7", default-features = false, features = ["tokio"] }
 tokio = { version = "1.0", default-features = false, features = [
     "rt",
     "macros",
     "signal",
-    "io-util",
+    "sync",
+    "time",
 ] }
 anyhow = "1.0"
-# Use a lighter logging implementation
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
-# High-performance synchronization primitives
-parking_lot = { version = "0.12", default-features = false }
 
 # Release profile optimizations for binary size
 [profile.release]
@@ -31,19 +27,19 @@ strip = true
 codegen-units = 1
 overflow-checks = false
 
-[build-dependencies]
-wayland-scanner = "0.31"
-
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/x86_64-unknown-linux-gnu/release/guayusa-wl", dest = "/usr/bin/guayusa", mode = "755" }, # Adjust 'source' if your binary path/name is different
+    { source = "target/x86_64-unknown-linux-gnu/release/guayusa-wl", dest = "/usr/bin/guayusa", mode = "755" },                                       # Adjust 'source' if your binary path/name is different
     { source = "systemd/guayusa.service", dest = "/usr/lib/systemd/user/guayusa.service", mode = "644" },
+    { source = "systemd/guayusa-swayidle-lock.service", dest = "/usr/lib/systemd/user/guayusa-swayidle-lock.service", mode = "644" },
+    { source = "systemd/guayusa-swayidle-suspend.service", dest = "/usr/lib/systemd/user/guayusa-swayidle-suspend.service", mode = "644" },
+    { source = "systemd/guayusa-swayidle-before-sleep.service", dest = "/usr/lib/systemd/user/guayusa-swayidle-before-sleep.service", mode = "644" },
 ]
 
 pre_uninstall_script = """
 if [ $1 -eq 0 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then
     # Package removal, not upgrade
-    /usr/lib/systemd/systemd-update-helper remove-user-units guayusa.service || :
+    /usr/lib/systemd/systemd-update-helper remove-user-units guayusa.service guayusa-swayidle-lock.service guayusa-swayidle-suspend.service guayusa-swayidle-before-sleep.service || :
 fi
 """
 post_install_script = """
