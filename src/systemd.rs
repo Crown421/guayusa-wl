@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
 use std::env;
-use tokio::sync::{Mutex, watch};
+use tokio::{
+    sync::{Mutex, watch},
+    time::{Duration, Instant, sleep},
+};
 use zbus::{Connection, Proxy, zvariant::OwnedObjectPath};
 
 const SYSTEMD_SERVICE: &str = "org.freedesktop.systemd1";
@@ -8,8 +11,19 @@ const SYSTEMD_MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
 
+pub const GUAYUSA_UNIT: &str = "guayusa.service";
+pub const BEFORE_SLEEP_UNIT: &str = "guayusa-swayidle-before-sleep.service";
 const DEFAULT_LOCK_UNIT: &str = "guayusa-swayidle-lock.service";
 const DEFAULT_SUSPEND_UNIT: &str = "guayusa-swayidle-suspend.service";
+const MODE_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+const MODE_SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+pub const DEFAULT_SETUP_UNITS: [&str; 4] = [
+    GUAYUSA_UNIT,
+    DEFAULT_LOCK_UNIT,
+    DEFAULT_SUSPEND_UNIT,
+    BEFORE_SLEEP_UNIT,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -61,6 +75,13 @@ enum UnitState {
     Unavailable,
 }
 
+#[derive(Debug, Clone)]
+pub struct UnitReport {
+    pub name: String,
+    pub active_state: String,
+    pub unit_file_state: String,
+}
+
 pub struct SystemdController {
     connection: Connection,
     lock_unit: String,
@@ -91,51 +112,66 @@ impl SystemdController {
         }
 
         let _guard = self.operation_lock.lock().await;
-        match mode {
-            Mode::Normal => {
-                self.start_unit(&self.lock_unit).await?;
-                self.start_unit(&self.suspend_unit).await?;
-            }
-            Mode::NoSuspend => {
-                self.start_unit(&self.lock_unit).await?;
-                self.stop_unit(&self.suspend_unit).await?;
-            }
-            Mode::NoIdle => {
-                self.stop_unit(&self.lock_unit).await?;
-                self.stop_unit(&self.suspend_unit).await?;
-            }
-            Mode::Custom | Mode::Unavailable => unreachable!(),
-        }
-
-        self.refresh_mode_locked().await
+        self.apply_mode_locked(mode).await?;
+        self.wait_for_mode_locked(mode).await
     }
 
     pub async fn cycle_mode(&self) -> Result<Mode> {
         let _guard = self.operation_lock.lock().await;
         let next_mode = self.refresh_mode_locked().await?.next_cycle();
 
-        match next_mode {
-            Mode::Normal => {
-                self.start_unit(&self.lock_unit).await?;
-                self.start_unit(&self.suspend_unit).await?;
-            }
-            Mode::NoSuspend => {
-                self.start_unit(&self.lock_unit).await?;
-                self.stop_unit(&self.suspend_unit).await?;
-            }
-            Mode::NoIdle => {
-                self.stop_unit(&self.lock_unit).await?;
-                self.stop_unit(&self.suspend_unit).await?;
-            }
-            Mode::Custom | Mode::Unavailable => unreachable!(),
-        }
-
-        self.refresh_mode_locked().await
+        self.apply_mode_locked(next_mode).await?;
+        self.wait_for_mode_locked(next_mode).await
     }
 
     pub async fn refresh_mode(&self) -> Result<Mode> {
         let _guard = self.operation_lock.lock().await;
         self.refresh_mode_locked().await
+    }
+
+    pub async fn up(&self) -> Result<Vec<UnitReport>> {
+        let _guard = self.operation_lock.lock().await;
+        self.reload().await?;
+        self.enable_unit_files(&DEFAULT_SETUP_UNITS).await?;
+
+        for unit in DEFAULT_SETUP_UNITS {
+            self.start_unit(unit).await?;
+        }
+        self.wait_for_mode_locked(Mode::Normal).await?;
+
+        self.setup_unit_reports().await
+    }
+
+    pub async fn setup_unit_reports(&self) -> Result<Vec<UnitReport>> {
+        let mut reports = Vec::with_capacity(DEFAULT_SETUP_UNITS.len());
+        for unit in DEFAULT_SETUP_UNITS {
+            reports.push(self.unit_report(unit).await);
+        }
+        Ok(reports)
+    }
+
+    pub async fn current_mode(&self) -> Result<Mode> {
+        self.refresh_mode().await
+    }
+
+    async fn apply_mode_locked(&self, mode: Mode) -> Result<()> {
+        match mode {
+            Mode::Normal => {
+                self.start_unit(&self.lock_unit).await?;
+                self.start_unit(&self.suspend_unit).await?;
+            }
+            Mode::NoSuspend => {
+                self.stop_unit(&self.suspend_unit).await?;
+                self.start_unit(&self.lock_unit).await?;
+            }
+            Mode::NoIdle => {
+                self.stop_unit(&self.suspend_unit).await?;
+                self.stop_unit(&self.lock_unit).await?;
+            }
+            Mode::Custom | Mode::Unavailable => unreachable!(),
+        }
+
+        Ok(())
     }
 
     async fn refresh_mode_locked(&self) -> Result<Mode> {
@@ -149,6 +185,29 @@ impl SystemdController {
         Ok(mode)
     }
 
+    async fn wait_for_mode_locked(&self, expected_mode: Mode) -> Result<Mode> {
+        let deadline = Instant::now() + MODE_SETTLE_TIMEOUT;
+
+        loop {
+            let current_mode = self.refresh_mode_locked().await?;
+            if current_mode == expected_mode {
+                return Ok(current_mode);
+            }
+
+            if Instant::now() >= deadline {
+                bail!(
+                    "requested mode {}, but systemd reported {} after {}s ({})",
+                    expected_mode.as_str(),
+                    current_mode.as_str(),
+                    MODE_SETTLE_TIMEOUT.as_secs(),
+                    self.unit_state_summary().await
+                );
+            }
+
+            sleep(MODE_SETTLE_POLL_INTERVAL).await;
+        }
+    }
+
     async fn manager_proxy(&self) -> Result<Proxy<'_>> {
         Proxy::new(
             &self.connection,
@@ -158,6 +217,24 @@ impl SystemdController {
         )
         .await
         .context("failed to create systemd manager proxy")
+    }
+
+    async fn reload(&self) -> Result<()> {
+        let proxy = self.manager_proxy().await?;
+        proxy
+            .call::<_, _, ()>("Reload", &())
+            .await
+            .context("failed to reload systemd user manager")?;
+        Ok(())
+    }
+
+    async fn enable_unit_files(&self, units: &[&str]) -> Result<()> {
+        let proxy = self.manager_proxy().await?;
+        let _: (bool, Vec<(String, String, String)>) = proxy
+            .call("EnableUnitFiles", &(units, false, true))
+            .await
+            .with_context(|| format!("failed to enable unit files: {}", units.join(", ")))?;
+        Ok(())
     }
 
     async fn start_unit(&self, unit: &str) -> Result<()> {
@@ -189,6 +266,15 @@ impl SystemdController {
     }
 
     async fn load_unit_state(&self, unit: &str) -> Result<UnitState> {
+        let active_state = self.load_unit_active_state(unit).await?;
+
+        Ok(match active_state.as_str() {
+            "active" | "activating" | "reloading" => UnitState::Active,
+            _ => UnitState::Inactive,
+        })
+    }
+
+    async fn load_unit_active_state(&self, unit: &str) -> Result<String> {
         let manager = self.manager_proxy().await?;
         let path: OwnedObjectPath = manager
             .call("LoadUnit", &(unit))
@@ -209,10 +295,48 @@ impl SystemdController {
             .await
             .with_context(|| format!("failed to read ActiveState for {unit}"))?;
 
-        Ok(match active_state.as_str() {
-            "active" | "activating" | "reloading" => UnitState::Active,
-            _ => UnitState::Inactive,
-        })
+        Ok(active_state)
+    }
+
+    async fn load_unit_file_state(&self, unit: &str) -> Result<String> {
+        let proxy = self.manager_proxy().await?;
+        proxy
+            .call("GetUnitFileState", &(unit))
+            .await
+            .with_context(|| format!("failed to read unit file state for {unit}"))
+    }
+
+    async fn unit_report(&self, unit: &str) -> UnitReport {
+        let active_state = self
+            .load_unit_active_state(unit)
+            .await
+            .unwrap_or_else(|e| format!("unavailable: {e}"));
+        let unit_file_state = self
+            .load_unit_file_state(unit)
+            .await
+            .unwrap_or_else(|e| format!("unavailable: {e}"));
+
+        UnitReport {
+            name: unit.to_string(),
+            active_state,
+            unit_file_state,
+        }
+    }
+
+    async fn unit_state_summary(&self) -> String {
+        let lock_state = self
+            .load_unit_active_state(&self.lock_unit)
+            .await
+            .unwrap_or_else(|e| format!("unavailable: {e}"));
+        let suspend_state = self
+            .load_unit_active_state(&self.suspend_unit)
+            .await
+            .unwrap_or_else(|e| format!("unavailable: {e}"));
+
+        format!(
+            "{} ActiveState={}, {} ActiveState={}",
+            self.lock_unit, lock_state, self.suspend_unit, suspend_state
+        )
     }
 }
 

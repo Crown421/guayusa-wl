@@ -30,13 +30,18 @@ It also ships this independent unit:
 
 - `guayusa-swayidle-before-sleep.service`
 
-Enable the units you want:
+Activate the default setup:
 
 ```bash
-systemctl --user enable --now guayusa.service
-systemctl --user enable --now guayusa-swayidle-lock.service
-systemctl --user enable --now guayusa-swayidle-suspend.service
-systemctl --user enable --now guayusa-swayidle-before-sleep.service
+guayusa up
+```
+
+This reloads the user systemd manager, enables the four packaged units, starts them, and prints their active/enabled state.
+
+Check the current setup:
+
+```bash
+guayusa status
 ```
 
 Remove any direct `swayidle` launch from your Sway config. If Sway still starts its own `swayidle` process, Guayusa can stop the managed units while the unmanaged process continues enforcing idle actions.

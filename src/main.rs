@@ -1,3 +1,4 @@
+mod cli;
 mod dbus;
 mod systemd;
 
@@ -11,6 +12,16 @@ use systemd::{Mode, SystemdController};
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    match cli::Command::parse()? {
+        cli::Command::Daemon => {}
+        cli::Command::Up => return cli::run_up().await,
+        cli::Command::Status => return cli::run_status().await,
+        cli::Command::Help => {
+            cli::print_usage();
+            return Ok(());
+        }
+    }
 
     log::info!("Starting Guayusa D-Bus service");
 
