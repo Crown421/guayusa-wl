@@ -27,41 +27,71 @@ impl IdleInhibitorInterface {
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+
+    async fn emit_mode_signals(emitter: &SignalEmitter<'_>, mode: Mode) {
+        if let Err(e) = Self::mode_changed_signal(emitter, mode.as_str()).await {
+            log::error!("Failed to emit ModeChanged signal: {}", e);
+        }
+        if let Err(e) = Self::status_changed_signal(emitter, mode.is_inhibited()).await {
+            log::error!("Failed to emit StatusChanged signal: {}", e);
+        }
+    }
 }
 
 #[interface(name = "org.guayusa.Idle")]
 impl IdleInhibitorInterface {
-    async fn enable(&self) -> zbus::fdo::Result<()> {
+    async fn enable(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: Enable method called");
-        self.set_controller_mode(Mode::NoIdle).await?;
+        let mode = self.set_controller_mode(Mode::NoIdle).await?;
+        Self::emit_mode_signals(&emitter, mode).await;
         Ok(())
     }
 
-    async fn disable(&self) -> zbus::fdo::Result<()> {
+    async fn disable(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: Disable method called");
-        self.set_controller_mode(Mode::Normal).await?;
+        let mode = self.set_controller_mode(Mode::Normal).await?;
+        Self::emit_mode_signals(&emitter, mode).await;
         Ok(())
     }
 
-    async fn set_inhibit(&self, enable: bool) -> zbus::fdo::Result<()> {
+    async fn set_inhibit(
+        &self,
+        enable: bool,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: SetInhibit method called with enable={}", enable);
         let mode = if enable { Mode::NoIdle } else { Mode::Normal };
-        self.set_controller_mode(mode).await?;
+        let mode = self.set_controller_mode(mode).await?;
+        Self::emit_mode_signals(&emitter, mode).await;
         Ok(())
     }
 
-    async fn set_mode(&self, mode: &str) -> zbus::fdo::Result<()> {
+    async fn set_mode(
+        &self,
+        mode: &str,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
         log::debug!("D-Bus: SetMode method called with mode={}", mode);
         let mode = Mode::parse_primary(mode).ok_or_else(|| {
             zbus::fdo::Error::InvalidArgs(format!(
                 "invalid mode {mode}; expected normal, no-suspend, or no-idle"
             ))
         })?;
-        self.set_controller_mode(mode).await?;
+        let mode = self.set_controller_mode(mode).await?;
+        Self::emit_mode_signals(&emitter, mode).await;
         Ok(())
     }
 
-    async fn toggle(&self) -> zbus::fdo::Result<bool> {
+    async fn toggle(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<bool> {
         log::debug!("D-Bus: Toggle method called");
         let current_mode = *self.mode_watch_rx.borrow();
         let next_mode = if current_mode == Mode::Normal {
@@ -70,16 +100,21 @@ impl IdleInhibitorInterface {
             Mode::Normal
         };
         let mode = self.set_controller_mode(next_mode).await?;
+        Self::emit_mode_signals(&emitter, mode).await;
         Ok(mode.is_inhibited())
     }
 
-    async fn cycle_mode(&self) -> zbus::fdo::Result<String> {
+    async fn cycle_mode(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<String> {
         log::debug!("D-Bus: CycleMode method called");
         let mode = self
             .controller
             .cycle_mode()
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        Self::emit_mode_signals(&emitter, mode).await;
         Ok(mode.as_str().to_string())
     }
 
@@ -93,12 +128,10 @@ impl IdleInhibitorInterface {
         self.mode_watch_rx.borrow().as_str().to_string()
     }
 
-    #[zbus(signal)]
-    #[zbus(name = "ModeChanged")]
+    #[zbus(signal, name = "ModeChanged")]
     async fn mode_changed_signal(emitter: &SignalEmitter<'_>, mode: &str) -> zbus::Result<()>;
 
-    #[zbus(signal)]
-    #[zbus(name = "StatusChanged")]
+    #[zbus(signal, name = "StatusChanged")]
     async fn status_changed_signal(emitter: &SignalEmitter<'_>, status: bool) -> zbus::Result<()>;
 }
 
@@ -138,52 +171,4 @@ pub async fn dbus_connection_task(_connection: Connection, shutdown_notify: Arc<
     log::info!("D-Bus connection task started, waiting for shutdown signal");
     shutdown_notify.notified().await;
     log::info!("D-Bus connection task shutting down");
-}
-
-pub async fn status_monitor_task(
-    connection: Connection,
-    mut mode_receiver: watch::Receiver<Mode>,
-    shutdown_notify: Arc<Notify>,
-) {
-    log::info!("Status monitor task started");
-    let mut last_status = mode_receiver.borrow_and_update().is_inhibited();
-    let signal_emitter = match SignalEmitter::new(&connection, DBUS_OBJECT_PATH) {
-        Ok(emitter) => emitter,
-        Err(e) => {
-            log::error!("Unable to create D-Bus signal emitter: {}", e);
-            return;
-        }
-    };
-
-    loop {
-        tokio::select! {
-            result = mode_receiver.changed() => {
-                match result {
-                    Ok(()) => {
-                        let current_mode = *mode_receiver.borrow_and_update();
-                        let mode_name = current_mode.as_str().to_string();
-                        let current_status = current_mode.is_inhibited();
-
-                        if let Err(e) = IdleInhibitorInterface::mode_changed_signal(&signal_emitter, &mode_name).await {
-                            log::error!("Failed to emit ModeChanged signal: {}", e);
-                        }
-                        if current_status != last_status {
-                            if let Err(e) = IdleInhibitorInterface::status_changed_signal(&signal_emitter, current_status).await {
-                                log::error!("Failed to emit StatusChanged signal: {}", e);
-                            }
-                            last_status = current_status;
-                        }
-                    }
-                    Err(_) => {
-                        log::info!("Mode watch channel closed, shutting down status monitor");
-                        break;
-                    }
-                }
-            }
-            _ = shutdown_notify.notified() => {
-                log::info!("Status monitor task shutting down");
-                break;
-            }
-        }
-    }
 }

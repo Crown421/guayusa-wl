@@ -38,12 +38,8 @@ async fn main() -> Result<()> {
         log::warn!("Unable to infer initial mode: {}", e);
     }
 
-    let dbus_connection = dbus::setup_dbus_service(
-        dbus_connection,
-        Arc::clone(&controller),
-        mode_receiver.clone(),
-    )
-    .await?;
+    let dbus_connection =
+        dbus::setup_dbus_service(dbus_connection, Arc::clone(&controller), mode_receiver).await?;
 
     let signal_shutdown_notify = Arc::clone(&shutdown_notify);
     tokio::spawn(async move {
@@ -63,12 +59,6 @@ async fn main() -> Result<()> {
         Arc::clone(&shutdown_notify),
     ));
 
-    let status_monitor_task = tokio::spawn(dbus::status_monitor_task(
-        dbus_connection.clone(),
-        mode_receiver,
-        Arc::clone(&shutdown_notify),
-    ));
-
     let state_poll_task = tokio::spawn(state_poll_task(
         Arc::clone(&controller),
         Arc::clone(&shutdown_notify),
@@ -78,11 +68,6 @@ async fn main() -> Result<()> {
         result = dbus_task => {
             if let Err(e) = result {
                 log::error!("D-Bus task join error: {}", e);
-            }
-        }
-        result = status_monitor_task => {
-            if let Err(e) = result {
-                log::error!("Status monitor task join error: {}", e);
             }
         }
         result = state_poll_task => {
